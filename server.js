@@ -13,7 +13,8 @@ const server = http.createServer(app);
 const io = socketIo(server);
 
 // Security: simple API key protection for send endpoints
-const API_KEY = process.env.WA_API_KEY || null;
+// Accept both WA_API_KEY and legacy WHTSP_SERVICE_API_KEY for flexibility
+const API_KEY = process.env.WA_API_KEY || process.env.WHTSP_SERVICE_API_KEY || null;
 
 function requireApiKey(req, res, next) {
   if (!API_KEY) return res.status(500).json({ ok: false, error: 'api_key_not_configured' });
@@ -162,17 +163,36 @@ function normalizeDigits(p) {
   return (p || '').toString().replace(/\D+/g, '');
 }
 
+// Normalize to E.164-like digits without '+' for whatsapp-web.js JID
+// Rules:
+// - If input starts with '+', keep country code as provided (do NOT override)
+// - If input starts with '00', treat as international and drop leading '00'
+// - If input is local (starts with '0' or no cc), require DEFAULT_CC, else return as-is (will fail upstream)
 function normalizePhone(phone) {
-  let p = normalizeDigits(phone);
-  if (!p) return p;
-  // If starts with 0 and DEFAULT_CC is provided, use it (e.g. 212)
-  if (p.startsWith('0') && process.env.DEFAULT_CC) {
-    p = process.env.DEFAULT_CC.replace(/\D+/g, '') + p.slice(1);
+  const raw = (phone || '').toString().trim();
+  if (!raw) return '';
+  if (raw.startsWith('+')) {
+    // Strip '+' but preserve digits
+    return normalizeDigits(raw);
   }
-  // If no country code, default to 212 if provided via env or fallback to 212
-  if (!p.startsWith('212') && process.env.DEFAULT_CC) {
-    const cc = process.env.DEFAULT_CC.replace(/\D+/g, '');
-    if (cc && !p.startsWith(cc)) p = cc + p;
+  if (raw.startsWith('00')) {
+    // '00' international prefix -> drop and keep rest
+    return normalizeDigits(raw.slice(2));
+  }
+  let p = normalizeDigits(raw);
+  if (!p) return '';
+  const ccEnv = (process.env.DEFAULT_CC || '').replace(/\D+/g, '');
+  // Local numbers: leading zero or missing cc
+  if (p.startsWith('0')) {
+    if (ccEnv) {
+      return ccEnv + p.slice(1);
+    }
+    return p; // no DEFAULT_CC: leave as-is; upstream will error
+  }
+  // If no explicit cc and env provided, prepend cc; else keep as provided
+  if (ccEnv && !p.startsWith(ccEnv)) {
+    // Heuristic: if length matches local pattern and doesn't start with cc, prepend cc
+    return ccEnv + p;
   }
   return p;
 }
@@ -220,7 +240,11 @@ app.post('/send-text', requireApiKey, async (req, res) => {
       return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
     }
     if (!phone || !text) return res.status(400).json({ ok: false, error: 'phone_and_text_required' });
+    // Prevent silent region changes: if user supplied '+' prefix, keep it
     const jid = normalizeToJid(phone);
+    const candidate = jid.replace('@c.us','');
+    // Basic sanity: international numbers should be at least 8 digits
+    if (candidate.length < 8) return res.status(400).json({ ok: false, error: 'invalid_phone' });
     const msg = await client.sendMessage(jid, text);
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
