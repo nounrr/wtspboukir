@@ -26,13 +26,33 @@ function requireApiKey(req, res, next) {
 const client = new Client({
   authStrategy: new LocalAuth({
     clientId: process.env.WWEBJS_CLIENT_ID || 'default',
-    dataPath: process.env.WWEBJS_AUTH_DIR ? path.resolve(process.env.WWEBJS_AUTH_DIR) : undefined,
+    // Persist auth in a stable folder to avoid session loss
+    dataPath: process.env.WWEBJS_AUTH_DIR
+      ? path.resolve(process.env.WWEBJS_AUTH_DIR)
+      : path.join(__dirname, 'auth'),
   }),
+  restartOnAuthFail: true,
+  takeoverOnConflict: true,
+  takeoverTimeoutMs: 60000,
+  qrMaxRetries: 5,
   puppeteer: {
     headless: true,
     // If Chrome is installed locally, you can set CHROME_PATH env to its executable
     executablePath: process.env.CHROME_PATH,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding'
+    ]
+  },
+  // Keep the web version in sync to reduce random session closes
+  webVersionCache: {
+    type: 'remote',
+    remotePath: process.env.WEB_VERSION_REMOTE || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json'
   }
 });
 
@@ -231,6 +251,23 @@ app.get('/qr', (_req, res) => {
   res.json({ qr: lastQr });
 });
 
+// Restart endpoint (secured)
+app.post('/restart', requireApiKey, async (_req, res) => {
+  try {
+    isClientReady = false;
+    lastState = 'RESTARTING';
+    try {
+      await client.destroy();
+    } catch (_) {}
+    setTimeout(() => {
+      scheduleReinit(500);
+    }, 200);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
 // Send plain text
 app.post('/send-text', requireApiKey, async (req, res) => {
   try {
@@ -249,6 +286,13 @@ app.post('/send-text', requireApiKey, async (req, res) => {
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-text error', e);
+    const msg = (e?.message || '').toLowerCase();
+    if (msg.includes('session closed') || msg.includes('protocol error')) {
+      lastState = 'DISCONNECTED';
+      isClientReady = false;
+      scheduleReinit(1000);
+      return res.status(503).json({ ok: false, error: 'wa_restarting' });
+    }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -294,6 +338,13 @@ app.post('/send-media', requireApiKey, async (req, res) => {
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-media error', e);
+    const msg = (e?.message || '').toLowerCase();
+    if (msg.includes('session closed') || msg.includes('protocol error')) {
+      lastState = 'DISCONNECTED';
+      isClientReady = false;
+      scheduleReinit(1000);
+      return res.status(503).json({ ok: false, error: 'wa_restarting' });
+    }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -332,6 +383,13 @@ app.post('/send-template', requireApiKey, async (req, res) => {
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-template error', e);
+    const msg = (e?.message || '').toLowerCase();
+    if (msg.includes('session closed') || msg.includes('protocol error')) {
+      lastState = 'DISCONNECTED';
+      isClientReady = false;
+      scheduleReinit(1000);
+      return res.status(503).json({ ok: false, error: 'wa_restarting' });
+    }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -354,3 +412,25 @@ server.on('error', (err) => {
   }
   process.exit(1);
 });
+
+// Global error guards: keep process alive and try reinit
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  scheduleReinit(5000);
+});
+
+// Health ping to keep chromium session active
+setInterval(async () => {
+  try {
+    await client.getState();
+  } catch (e) {
+    // If state call fails and we were connected, trigger a reinit
+    if (lastState === 'CONNECTED') {
+      console.warn('Health ping failed, scheduling reinit');
+      scheduleReinit(3000);
+    }
+  }
+}, 60000);
