@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WhatsApp Logs</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #fafafa;
+      color: #171717;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .header {
+      padding: 32px 0 24px;
+      border-bottom: 1px solid #e5e5e5;
+      margin-bottom: 32px;
+    }
+    .header h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: #171717;
+      margin-bottom: 4px;
+    }
+    .header .subtitle {
+      font-size: 14px;
+      color: #737373;
+      font-weight: 400;
+    }
+    .topbar {
+      background: white;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+    .topbar.hidden { display: none; }
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #171717;
+    }
+    input, select {
+      padding: 8px 12px;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: inherit;
+      background: white;
+      transition: all 0.15s ease;
+    }
+    input:focus, select:focus {
+      outline: none;
+      border-color: #171717;
+      box-shadow: 0 0 0 1px #171717;
+    }
+    button {
+      background: #171717;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-weight: 500;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: all 0.15s ease;
+    }
+    button:hover:not(:disabled) {
+      background: #404040;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .content {
+      background: white;
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      padding: 24px;
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+    }
+    .stats-bar {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #e5e5e5;
+    }
+    .stat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #fafafa;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #737373;
+    }
+    .stat-badge b {
+      color: #171717;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .muted {
+      color: #737373;
+      font-size: 13px;
+    }
+    .pagination {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      margin: 20px 0;
+    }
+    .pagination button {
+      padding: 6px 12px;
+      background: white;
+      color: #171717;
+      border: 1px solid #e5e5e5;
+      font-size: 13px;
+    }
+    .pagination button:hover:not(:disabled) {
+      background: #fafafa;
+      border-color: #d4d4d4;
+    }
+    .pagination span {
+      font-weight: 500;
+      color: #171717;
+      font-size: 13px;
+      padding: 0 8px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid #e5e5e5;
+    }
+    th {
+      background: #fafafa;
+      color: #525252;
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    tbody tr:hover {
+      background: #fafafa;
+    }
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+    .ok {
+      color: #16a34a;
+      font-weight: 600;
+      background: #f0fdf4;
+      padding: 2px 8px;
+      border-radius: 4px;
+      display: inline-block;
+      font-size: 11px;
+    }
+    .err {
+      color: #dc2626;
+      font-weight: 600;
+      background: #fef2f2;
+      padding: 2px 8px;
+      border-radius: 4px;
+      display: inline-block;
+      font-size: 11px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .container { padding: 16px; }
+    }
+    .sidebar {
+      background: #fafafa;
+      padding: 16px;
+      border-radius: 6px;
+      border: 1px solid #e5e5e5;
+      height: fit-content;
+      position: sticky;
+      top: 20px;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+    .sidebar h3 {
+      font-size: 14px;
+      color: #171717;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    ul {
+      list-style: none;
+    }
+    ul li {
+      padding: 6px 0;
+      border-bottom: 1px solid #e5e5e5;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: #525252;
+    }
+    ul li:last-child {
+      border-bottom: none;
+    }
+    ul li b {
+      color: #171717;
+      font-weight: 600;
+    }
+    a {
+      color: #171717;
+      text-decoration: none;
+      font-weight: 500;
+      transition: color 0.15s;
+    }
+    a:hover {
+      color: #525252;
+    }
+    code {
+      background: #fafafa;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: 'SF Mono', 'Consolas', monospace;
+      border: 1px solid #e5e5e5;
+    }
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #737373;
+    }
+    .loading::after {
+      content: '...';
+      animation: dots 1.5s infinite;
+    }
+    @keyframes dots {
+      0%, 20% { content: '.'; }
+      40% { content: '..'; }
+      60%, 100% { content: '...'; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>WhatsApp Logs</h1>
+      <div class="subtitle">
+        <span id="status">Loading...</span>
+      </div>
+    </div>
+
+    <div class="topbar" id="topbar">
+      <div class="row">
+        <label>
+          API Key
+          <input id="apiKey" type="password" placeholder="Enter your API key" style="min-width: 240px;" />
+        </label>
+        <label>
+          Items per page
+          <select id="perPage">
+            <option>25</option>
+            <option selected>50</option>
+            <option>100</option>
+            <option>200</option>
+          </select>
+        </label>
+        <button id="reload">Load</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="stats-bar">
+        <div class="stat-badge">
+          <span>Total</span>
+          <b id="total">0</b>
+        </div>
+        <div class="stat-badge">
+          <span>Showing</span>
+          <b id="showing">0</b>
+        </div>
+        <span class="muted" id="range"></span>
+        <a id="jsonLink" href="/logs.json" target="_blank" rel="noreferrer">Download JSON</a>
+      </div>
+
+      <div class="grid">
+        <div class="sidebar">
+          <h3>Messages by date</h3>
+          <ul id="byDay"><li class="muted">Loading...</li></ul>
+        </div>
+        <div>
+          <div class="pagination">
+            <button id="firstBtn">First</button>
+            <button id="prevBtn">Previous</button>
+            <span id="pageInfo">Page 1</span>
+            <button id="nextBtn">Next</button>
+            <button id="lastBtn">Last</button>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Status</th>
+                <th>Phone</th>
+                <th>Type</th>
+                <th>Message</th>
+                <th>Document</th>
+                <th>Message ID</th>
+                <th>Source</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="rows">
+              <tr><td colspan="9" class="loading">Loading</td></tr>
+            </tbody>
+          </table>
+
+          <div class="pagination">
+            <button id="firstBtn2">First</button>
+            <button id="prevBtn2">Previous</button>
+            <span id="pageInfo2">Page 1</span>
+            <button id="nextBtn2">Next</button>
+            <button id="lastBtn2">Last</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    let allMessages = [];
+    let currentPage = 1;
+    let perPage = 50;
+
+    function esc(s) {
+      return String(s ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function getQueryKey() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('key') || '';
+    }
+
+    function setStatus(text) {
+      const statusEl = el('status');
+      if (statusEl) statusEl.textContent = text;
+    }
+
+    function getTotalPages() {
+      return Math.max(1, Math.ceil(allMessages.length / perPage));
+    }
+
+    function renderPage() {
+      const totalPages = getTotalPages();
+      if (currentPage > totalPages) currentPage = totalPages;
+      if (currentPage < 1) currentPage = 1;
+
+      const start = (currentPage - 1) * perPage;
+      const end = start + perPage;
+      const pageMessages = allMessages.slice(start, end);
+
+      // Rows
+      const rowsHtml = pageMessages.map(m => {
+        const ok = m && m.ok ? 'OK' : 'ERR';
+        const okCls = m && m.ok ? 'ok' : 'err';
+        const docPath = m && m.docPath ? String(m.docPath) : '';
+        const docCell = docPath ? `<a href="${esc(docPath)}" target="_blank" rel="noreferrer">${esc(docPath.length > 40 ? docPath.slice(0, 37) + '...' : docPath)}</a>` : '-';
+        const text = (m && (m.text || m.caption)) ? (m.text || m.caption) : '-';
+        const displayText = text.length > 80 ? text.slice(0, 77) + '...' : text;
+        const dateStr = m && m.iso ? new Date(m.iso).toLocaleString('fr-FR') : '-';
+        return `
+          <tr>
+            <td>${esc(dateStr)}</td>
+            <td><span class="${okCls}">${esc(ok)}</span></td>
+            <td>${esc(m && m.phone || '-')}</td>
+            <td>${esc(m && m.type || '-')}</td>
+            <td>${esc(displayText)}</td>
+            <td>${docCell}</td>
+            <td style="font-size: 11px;">${esc(m && m.messageId || '-')}</td>
+            <td>${esc(m && (m.endpoint || m.source) || '-')}</td>
+            <td style="color: #dc3545;">${esc(m && m.error || '')}</td>
+          </tr>`;
+      }).join('');
+
+      el('rows').innerHTML = rowsHtml || '<tr><td colspan="9" class="muted" style="text-align:center;">Aucun message</td></tr>';
+      el('showing').textContent = String(pageMessages.length);
+
+      // Pagination controls
+      const pageInfoText = `Page ${currentPage} / ${totalPages}`;
+      el('pageInfo').textContent = pageInfoText;
+      el('pageInfo2').textContent = pageInfoText;
+
+      const disableFirst = currentPage === 1;
+      const disableLast = currentPage === totalPages;
+
+      el('firstBtn').disabled = disableFirst;
+      el('prevBtn').disabled = disableFirst;
+      el('nextBtn').disabled = disableLast;
+      el('lastBtn').disabled = disableLast;
+      el('firstBtn2').disabled = disableFirst;
+      el('prevBtn2').disabled = disableFirst;
+      el('nextBtn2').disabled = disableLast;
+      el('lastBtn2').disabled = disableLast;
+
+      // Scroll to top
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    async function load() {
+      setStatus('Loading...');
+      el('rows').innerHTML = '<tr><td colspan="9" class="loading">Loading data</td></tr>';
+      el('byDay').innerHTML = '';
+
+      try {
+        let data = null;
+        
+        // Try API first if we have a server
+        const isFileProtocol = window.location.protocol === 'file:';
+        
+        if (!isFileProtocol) {
+          try {
+            const key = el('apiKey').value.trim();
+            const url = new URL('/logs.json', window.location.origin);
+            if (key) url.searchParams.set('key', key);
+            url.searchParams.set('limit', '99999');
+            
+            el('jsonLink').href = url.toString();
+            const resp = await fetch(url.toString(), { method: 'GET' });
+            if (resp.ok) {
+              data = await resp.json();
+            }
+          } catch (e) {
+            console.log('API not available, using mock data');
+          }
+        }
+        
+        // Fallback to mock data
+        if (!data) {
+          const mockResp = await fetch('./mock-data.json');
+          data = await mockResp.json();
+          setStatus('Using mock data');
+        }
+
+        const stats = data.stats || {};
+        const messages = Array.isArray(data.messages) ? data.messages : [];
+
+        // Reverse to show newest first
+        allMessages = messages.slice().reverse();
+        currentPage = 1;
+        perPage = Number(el('perPage').value) || 50;
+
+        el('total').textContent = String(stats.total ?? messages.length ?? 0);
+        const first = stats.firstIso || '';
+        const last = stats.lastIso || '';
+        el('range').textContent = first && last ? `${first.split('T')[0]} → ${last.split('T')[0]}` : '';
+
+        // By day
+        const days = Array.isArray(stats.days) ? stats.days : Object.keys(stats.byDay || {});
+        const byDay = stats.byDay || {};
+        const dayList = days.slice().sort().reverse();
+        if (dayList.length === 0) {
+          el('byDay').innerHTML = '<li class="muted">Aucun log</li>';
+        } else {
+          el('byDay').innerHTML = dayList.map(d => `<li><span>${esc(d)}</span><b>${esc(byDay[d])}</b></li>`).join('');
+        }
+
+        renderPage();
+        setStatus('✅ Loaded');
+      } catch (e) {
+        setStatus('❌ Error: ' + (e && e.message ? e.message : String(e)));
+        el('rows').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#dc3545;">${esc(e && e.message || 'Unknown error')}</td></tr>`;
+      }
+    }
+
+    // Pagination handlers
+    function goToPage(page) {
+      currentPage = page;
+      renderPage();
+    }
+
+    el('firstBtn').addEventListener('click', () => goToPage(1));
+    el('firstBtn2').addEventListener('click', () => goToPage(1));
+    el('prevBtn').addEventListener('click', () => goToPage(currentPage - 1));
+    el('prevBtn2').addEventListener('click', () => goToPage(currentPage - 1));
+    el('nextBtn').addEventListener('click', () => goToPage(currentPage + 1));
+    el('nextBtn2').addEventListener('click', () => goToPage(currentPage + 1));
+    el('lastBtn').addEventListener('click', () => goToPage(getTotalPages()));
+    el('lastBtn2').addEventListener('click', () => goToPage(getTotalPages()));
+
+    el('perPage').addEventListener('change', () => {
+      perPage = Number(el('perPage').value) || 50;
+      currentPage = 1;
+      renderPage();
+    });
+
+    // init
+    const injectedKey = '__API_KEY_PLACEHOLDER__'; // Will be replaced by server
+    const queryKey = getQueryKey();
+    const finalKey = injectedKey && injectedKey !== '__API_KEY_PLACEHOLDER__' 
+      ? injectedKey 
+      : (queryKey || localStorage.getItem('wa_logs_api_key') || '');
+    
+    el('apiKey').value = finalKey;
+    
+    // Hide topbar always (auto load)
+    el('topbar').classList.add('hidden');
+
+    el('reload').addEventListener('click', () => {
+      localStorage.setItem('wa_logs_api_key', el('apiKey').value.trim());
+      load();
+    });
+
+    // Auto load always
+    load();
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.key === 'ArrowLeft') {
+        if (currentPage > 1) goToPage(currentPage - 1);
+      } else if (e.key === 'ArrowRight') {
+        if (currentPage < getTotalPages()) goToPage(currentPage + 1);
+      }
+    });
+  </script>
+</body>
+</html>

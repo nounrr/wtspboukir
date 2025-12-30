@@ -7,6 +7,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
 const qrcodeTerminal = require('qrcode-terminal');
+const waLogs = require('./logs');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,8 +18,8 @@ const io = socketIo(server);
 const API_KEY = process.env.WA_API_KEY || process.env.WHTSP_SERVICE_API_KEY || null;
 
 function requireApiKey(req, res, next) {
-  if (!API_KEY) return res.status(500).json({ ok: false, error: 'api_key_not_configured' });
-  const provided = req.get('x-api-key');
+  if (!API_KEY) return next(); // Skip auth if no API key configured
+  const provided = req.get('x-api-key') || req.query?.key;
   if (!provided || provided !== API_KEY) return res.status(401).json({ ok: false, error: 'unauthorized' });
   next();
 }
@@ -164,11 +165,31 @@ io.on('connection', (socket) => {
         return;
       }
 
-      await client.sendMessage(chatId, message);
+      const msg = await client.sendMessage(chatId, message);
       console.log('Message envoyé à', phoneNumber);
+      waLogs.appendLog({
+        source: 'socket',
+        endpoint: 'socket.send_message',
+        phone: phoneNumber,
+        jid: chatId,
+        type: 'text',
+        text: message,
+        ok: true,
+        messageId: msg?.id?._serialized || null,
+      }).catch(() => {});
       socket.emit('message_success', { phoneNumber });
     } catch (err) {
       console.error('Erreur envoi message ❌', err);
+      waLogs.appendLog({
+        source: 'socket',
+        endpoint: 'socket.send_message',
+        phone: phoneNumber,
+        jid: normalizeToJid(phoneNumber),
+        type: 'text',
+        text: message,
+        ok: false,
+        error: err?.message || 'unknown',
+      }).catch(() => {});
       socket.emit('message_error', err.message || 'Erreur lors de l\'envoi du message');
     }
   });
@@ -251,6 +272,34 @@ app.get('/qr', (_req, res) => {
   res.json({ qr: lastQr });
 });
 
+// Logs (HTML + JSON) - secured via API key (header x-api-key or ?key=...)
+app.get('/logs.json', requireApiKey, async (req, res) => {
+  try {
+    const limit = req.query?.limit ? Number(req.query.limit) : (process.env.WA_LOG_MAX ? Number(process.env.WA_LOG_MAX) : 500);
+    const messages = await waLogs.readLastLogs({ limit });
+    const stats = waLogs.computeStats(messages);
+    res.json({ ok: true, stats, messages, logFile: waLogs.getLogFilePath() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+app.get('/logs', async (req, res) => {
+  try {
+    const htmlPath = path.join(__dirname, 'public', 'logs.html');
+    let html = await require('fs').promises.readFile(htmlPath, 'utf8');
+    
+    // Inject API key from env into HTML
+    const apiKey = API_KEY || '';
+    html = html.replace('__API_KEY_PLACEHOLDER__', apiKey);
+    
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (e) {
+    res.status(500).send(`<pre>${String(e?.message || e)}</pre>`);
+  }
+});
+
 // Restart endpoint (secured)
 app.post('/restart', requireApiKey, async (_req, res) => {
   try {
@@ -283,9 +332,33 @@ app.post('/send-text', requireApiKey, async (req, res) => {
     // Basic sanity: international numbers should be at least 8 digits
     if (candidate.length < 8) return res.status(400).json({ ok: false, error: 'invalid_phone' });
     const msg = await client.sendMessage(jid, text);
+    waLogs.appendLog({
+      source: 'rest',
+      endpoint: 'POST /send-text',
+      phone,
+      jid,
+      type: 'text',
+      text,
+      ok: true,
+      messageId: msg?.id?._serialized || null,
+    }).catch(() => {});
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-text error', e);
+    try {
+      const { phone, text } = req.body || {};
+      const jid = phone ? normalizeToJid(phone) : null;
+      waLogs.appendLog({
+        source: 'rest',
+        endpoint: 'POST /send-text',
+        phone,
+        jid,
+        type: 'text',
+        text,
+        ok: false,
+        error: e?.message || 'unknown',
+      }).catch(() => {});
+    } catch (_) {}
     const msg = (e?.message || '').toLowerCase();
     if (msg.includes('session closed') || msg.includes('protocol error')) {
       lastState = 'DISCONNECTED';
@@ -335,9 +408,42 @@ app.post('/send-media', requireApiKey, async (req, res) => {
     const jid = normalizeToJid(phone);
     const media = new MessageMedia(mediaMime, mediaBase64, mediaName);
     const msg = await client.sendMessage(jid, media, caption ? { caption } : undefined);
+
+    // IMPORTANT: we never store base64 in logs. For documents/media, store only doc path (URL) or filename.
+    waLogs.appendLog({
+      source: 'rest',
+      endpoint: 'POST /send-media',
+      phone,
+      jid,
+      type: 'media',
+      caption: caption || null,
+      docPath: mediaUrl || mediaName || null,
+      mimeType: mediaMime || null,
+      filename: mediaName || null,
+      ok: true,
+      messageId: msg?.id?._serialized || null,
+    }).catch(() => {});
+
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-media error', e);
+    try {
+      const { phone, caption, mediaUrl, mimetype, filename } = req.body || {};
+      const jid = phone ? normalizeToJid(phone) : null;
+      waLogs.appendLog({
+        source: 'rest',
+        endpoint: 'POST /send-media',
+        phone,
+        jid,
+        type: 'media',
+        caption: caption || null,
+        docPath: mediaUrl || filename || null,
+        mimeType: mimetype || null,
+        filename: filename || null,
+        ok: false,
+        error: e?.message || 'unknown',
+      }).catch(() => {});
+    } catch (_) {}
     const msg = (e?.message || '').toLowerCase();
     if (msg.includes('session closed') || msg.includes('protocol error')) {
       lastState = 'DISCONNECTED';
@@ -380,9 +486,38 @@ app.post('/send-template', requireApiKey, async (req, res) => {
 
     const jid = normalizeToJid(phone);
     const msg = await client.sendMessage(jid, text);
+
+    waLogs.appendLog({
+      source: 'rest',
+      endpoint: 'POST /send-template',
+      phone,
+      jid,
+      type: 'template',
+      templateKey,
+      params: params || {},
+      text,
+      ok: true,
+      messageId: msg?.id?._serialized || null,
+    }).catch(() => {});
+
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-template error', e);
+    try {
+      const { phone, templateKey, params } = req.body || {};
+      const jid = phone ? normalizeToJid(phone) : null;
+      waLogs.appendLog({
+        source: 'rest',
+        endpoint: 'POST /send-template',
+        phone,
+        jid,
+        type: 'template',
+        templateKey: templateKey || null,
+        params: params || {},
+        ok: false,
+        error: e?.message || 'unknown',
+      }).catch(() => {});
+    } catch (_) {}
     const msg = (e?.message || '').toLowerCase();
     if (msg.includes('session closed') || msg.includes('protocol error')) {
       lastState = 'DISCONNECTED';
