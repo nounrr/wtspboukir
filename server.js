@@ -5,6 +5,7 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
+const fs = require('fs');
 const path = require('path');
 const qrcodeTerminal = require('qrcode-terminal');
 const waLogs = require('./logs');
@@ -24,13 +25,41 @@ function requireApiKey(req, res, next) {
   next();
 }
 
+const WWEBJS_CLIENT_ID = process.env.WWEBJS_CLIENT_ID || 'default';
+const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
+  ? path.resolve(process.env.WWEBJS_AUTH_DIR)
+  : path.join(__dirname, 'auth');
+
+let didCleanupSingletonLocks = false;
+async function cleanupChromiumSingletonLocks() {
+  if (didCleanupSingletonLocks) return;
+  didCleanupSingletonLocks = true;
+
+  const sessionDir = path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
+  const files = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+
+  try {
+    await fs.promises.access(sessionDir);
+  } catch (_) {
+    return; // No session dir yet
+  }
+
+  for (const f of files) {
+    const p = path.join(sessionDir, f);
+    try {
+      await fs.promises.unlink(p);
+      console.log(`Removed stale Chromium lock: ${p}`);
+    } catch (e) {
+      // Ignore if not present or cannot delete
+    }
+  }
+}
+
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: process.env.WWEBJS_CLIENT_ID || 'default',
+    clientId: WWEBJS_CLIENT_ID,
     // Persist auth in a stable folder to avoid session loss
-    dataPath: process.env.WWEBJS_AUTH_DIR
-      ? path.resolve(process.env.WWEBJS_AUTH_DIR)
-      : path.join(__dirname, 'auth'),
+    dataPath: WWEBJS_AUTH_DIR,
   }),
   restartOnAuthFail: true,
   takeoverOnConflict: true,
@@ -529,7 +558,12 @@ app.post('/send-template', requireApiKey, async (req, res) => {
   }
 });
 
-client.initialize();
+(async () => {
+  // If the process previously crashed, Chromium can leave a SingletonLock in the
+  // session profile folder and refuse to start. Clean it once on startup.
+  await cleanupChromiumSingletonLocks();
+  client.initialize();
+})();
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -551,6 +585,12 @@ server.on('error', (err) => {
 // Global error guards: keep process alive and try reinit
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
+  const msg = (reason?.message || reason?.toString?.() || '').toLowerCase();
+  if (msg.includes('failed to launch the browser process') || msg.includes('processsingleton')) {
+    cleanupChromiumSingletonLocks()
+      .then(() => scheduleReinit(1000))
+      .catch(() => scheduleReinit(2000));
+  }
 });
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
