@@ -269,7 +269,20 @@ function normalizePhone(phone) {
 
 function normalizeToJid(phone) {
   const digits = normalizePhone(phone);
+  if (!digits) return '';
   return `${digits}@c.us`;
+}
+
+async function resolveJidFromPhone(phone) {
+  const digits = normalizePhone(phone);
+  if (!digits) return null;
+  if (digits.length < 8) return null;
+  try {
+    const numberId = await client.getNumberId(digits);
+    return numberId?._serialized || `${digits}@c.us`;
+  } catch (_) {
+    return null;
+  }
 }
 
 // REST endpoints
@@ -355,11 +368,8 @@ app.post('/send-text', requireApiKey, async (req, res) => {
       return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
     }
     if (!phone || !text) return res.status(400).json({ ok: false, error: 'phone_and_text_required' });
-    // Prevent silent region changes: if user supplied '+' prefix, keep it
-    const jid = normalizeToJid(phone);
-    const candidate = jid.replace('@c.us','');
-    // Basic sanity: international numbers should be at least 8 digits
-    if (candidate.length < 8) return res.status(400).json({ ok: false, error: 'invalid_phone' });
+    const jid = await resolveJidFromPhone(phone);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
     const msg = await client.sendMessage(jid, text);
     waLogs.appendLog({
       source: 'rest',
@@ -434,7 +444,8 @@ app.post('/send-media', requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'media_data_missing' });
     }
 
-    const jid = normalizeToJid(phone);
+    const jid = await resolveJidFromPhone(phone);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
     const media = new MessageMedia(mediaMime, mediaBase64, mediaName);
     const msg = await client.sendMessage(jid, media, caption ? { caption } : undefined);
 
