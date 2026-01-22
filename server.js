@@ -524,7 +524,11 @@ app.post('/send-template', requireApiKey, async (req, res) => {
     const text = data?.text || '';
     if (!text) throw new Error('Rendered text empty');
 
-    const jid = normalizeToJid(phone);
+    // IMPORTANT: resolve the phone via WhatsApp registry before sending.
+    // This prevents whatsapp-web.js from crashing inside page.evaluate when chat is undefined
+    // (one common symptom: "Evaluation failed: ... reading 'markedUnread'").
+    const jid = await resolveJidFromPhone(phone);
+    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
     const msg = await client.sendMessage(jid, text);
 
     waLogs.appendLog({
