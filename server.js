@@ -288,6 +288,42 @@ async function resolveJidFromPhone(phone) {
   }
 }
 
+function looksLikeNoLidError(err) {
+  const m = (err?.message || String(err || '')).toLowerCase();
+  return m.includes('no lid for user') || m.includes('tolid') || m.includes('touserlidorthrow');
+}
+
+async function sendWithLidFallback({ phone, jid, digits, payload, options }) {
+  // First try with the resolved JID (usually ...@c.us)
+  try {
+    return await client.sendMessage(jid, payload, options);
+  } catch (e) {
+    // Workaround for recent WhatsApp Web changes where some accounts fail with:
+    // "Evaluation failed: Error: No LID for user".
+    if (!looksLikeNoLidError(e)) throw e;
+
+    const altDigits = digits || normalizePhone(phone);
+    if (!altDigits) throw e;
+
+    // Try alternate server form used by WhatsApp internally.
+    const altJid = `${altDigits}@s.whatsapp.net`;
+    try {
+      return await client.sendMessage(altJid, payload, options);
+    } catch (e2) {
+      // Last attempt: if jid was ...@c.us, try again explicitly.
+      const cUsJid = `${altDigits}@c.us`;
+      if (cUsJid !== jid) {
+        try {
+          return await client.sendMessage(cUsJid, payload, options);
+        } catch (_) {
+          // fall through
+        }
+      }
+      throw e2;
+    }
+  }
+}
+
 // REST endpoints
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -397,9 +433,11 @@ app.post('/send-text', requireApiKey, async (req, res) => {
       return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
     }
     if (!phone || !text) return res.status(400).json({ ok: false, error: 'phone_and_text_required' });
+    const digits = normalizePhone(phone);
     const jid = await resolveJidFromPhone(phone);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
-    const msg = await client.sendMessage(jid, text);
+
+    const msg = await sendWithLidFallback({ phone, jid, digits, payload: text });
     waLogs.appendLog({
       source: 'rest',
       endpoint: 'POST /send-text',
@@ -433,6 +471,9 @@ app.post('/send-text', requireApiKey, async (req, res) => {
       isClientReady = false;
       scheduleReinit(1000);
       return res.status(503).json({ ok: false, error: 'wa_restarting' });
+    }
+    if (looksLikeNoLidError(e)) {
+      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
     }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
@@ -473,10 +514,18 @@ app.post('/send-media', requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'media_data_missing' });
     }
 
+    const digits = normalizePhone(phone);
     const jid = await resolveJidFromPhone(phone);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
     const media = new MessageMedia(mediaMime, mediaBase64, mediaName);
-    const msg = await client.sendMessage(jid, media, caption ? { caption } : undefined);
+
+    const msg = await sendWithLidFallback({
+      phone,
+      jid,
+      digits,
+      payload: media,
+      options: caption ? { caption } : undefined,
+    });
 
     // IMPORTANT: we never store base64 in logs. For documents/media, store only doc path (URL) or filename.
     waLogs.appendLog({
@@ -520,6 +569,9 @@ app.post('/send-media', requireApiKey, async (req, res) => {
       scheduleReinit(1000);
       return res.status(503).json({ ok: false, error: 'wa_restarting' });
     }
+    if (looksLikeNoLidError(e)) {
+      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
+    }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -556,9 +608,11 @@ app.post('/send-template', requireApiKey, async (req, res) => {
     // IMPORTANT: resolve the phone via WhatsApp registry before sending.
     // This prevents whatsapp-web.js from crashing inside page.evaluate when chat is undefined
     // (one common symptom: "Evaluation failed: ... reading 'markedUnread'").
+    const digits = normalizePhone(phone);
     const jid = await resolveJidFromPhone(phone);
     if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
-    const msg = await client.sendMessage(jid, text);
+
+    const msg = await sendWithLidFallback({ phone, jid, digits, payload: text });
 
     waLogs.appendLog({
       source: 'rest',
@@ -597,6 +651,9 @@ app.post('/send-template', requireApiKey, async (req, res) => {
       isClientReady = false;
       scheduleReinit(1000);
       return res.status(503).json({ ok: false, error: 'wa_restarting' });
+    }
+    if (looksLikeNoLidError(e)) {
+      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
     }
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
