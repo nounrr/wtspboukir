@@ -279,7 +279,10 @@ async function resolveJidFromPhone(phone) {
   if (digits.length < 8) return null;
   try {
     const numberId = await client.getNumberId(digits);
-    return numberId?._serialized || `${digits}@c.us`;
+    // Only return a JID if WhatsApp confirms the number exists.
+    // Falling back to `${digits}@c.us` can crash inside whatsapp-web.js/WhatsApp Web
+    // (e.g. "Evaluation failed ... reading 'markedUnread'") when the chat object is undefined.
+    return numberId?._serialized || null;
   } catch (_) {
     return null;
   }
@@ -307,6 +310,32 @@ app.get('/status', async (_req, res) => {
     lastReadyAt,
     now: Date.now()
   });
+});
+
+// Check if a phone number is registered on WhatsApp (no message is sent)
+// Secured via API key because it can be abused for number enumeration.
+app.get('/check-number', requireApiKey, async (req, res) => {
+  try {
+    const phone = (req.query?.phone || '').toString();
+    if (!phone) return res.status(400).json({ ok: false, error: 'phone_required' });
+
+    const state = lastState;
+    if (state !== 'CONNECTED') {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
+    }
+
+    const digits = normalizePhone(phone);
+    const jid = await resolveJidFromPhone(phone);
+    res.json({
+      ok: true,
+      input: phone,
+      normalizedDigits: digits || null,
+      registered: !!jid,
+      jid: jid || null,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
 });
 
 app.get('/qr', (_req, res) => {
