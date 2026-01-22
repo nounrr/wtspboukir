@@ -18,6 +18,10 @@ const io = socketIo(server);
 // Accept both WA_API_KEY and legacy WHTSP_SERVICE_API_KEY for flexibility
 const API_KEY = process.env.WA_API_KEY || process.env.WHTSP_SERVICE_API_KEY || null;
 
+// WhatsApp Web can crash on some versions when trying to auto-mark chats as seen.
+// Default: DO NOT send seen (safer). Set WA_SEND_SEEN=1 to re-enable.
+const WA_SEND_SEEN = String(process.env.WA_SEND_SEEN || '').trim() === '1';
+
 function requireApiKey(req, res, next) {
   if (!API_KEY) return next(); // Skip auth if no API key configured
   const provided = req.get('x-api-key') || req.query?.key;
@@ -189,22 +193,25 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const chatId = normalizeToJid(phoneNumber);
-      
-      // Vérifier que le numéro est valide
-      const numberId = await client.getNumberId(chatId.replace('@c.us',''));
-      if (!numberId) {
+      const digits = normalizePhone(phoneNumber);
+      const jid = await resolveJidFromPhone(phoneNumber);
+      if (!jid) {
         socket.emit('message_error', 'Numéro WhatsApp invalide ou non enregistré');
         return;
       }
 
-      const msg = await client.sendMessage(chatId, message);
+      const msg = await sendWithLidFallback({
+        phone: phoneNumber,
+        jid,
+        digits,
+        payload: message,
+      });
       console.log('Message envoyé à', phoneNumber);
       waLogs.appendLog({
         source: 'socket',
         endpoint: 'socket.send_message',
         phone: phoneNumber,
-        jid: chatId,
+        jid,
         type: 'text',
         text: message,
         ok: true,
@@ -298,9 +305,15 @@ function looksLikeNoLidError(err) {
 }
 
 async function sendWithLidFallback({ phone, jid, digits, payload, options }) {
+  // Default options: disable sendSeen unless explicitly enabled.
+  const mergedOptions = {
+    ...(options || {}),
+    sendSeen: WA_SEND_SEEN,
+  };
+
   // First try with the resolved JID (usually ...@c.us)
   try {
-    return await client.sendMessage(jid, payload, options);
+    return await client.sendMessage(jid, payload, mergedOptions);
   } catch (e) {
     // Workaround for recent WhatsApp Web changes where some accounts fail with:
     // "Evaluation failed: Error: No LID for user".
@@ -312,13 +325,13 @@ async function sendWithLidFallback({ phone, jid, digits, payload, options }) {
     // Try alternate server form used by WhatsApp internally.
     const altJid = `${altDigits}@s.whatsapp.net`;
     try {
-      return await client.sendMessage(altJid, payload, options);
+      return await client.sendMessage(altJid, payload, mergedOptions);
     } catch (e2) {
       // Last attempt: if jid was ...@c.us, try again explicitly.
       const cUsJid = `${altDigits}@c.us`;
       if (cUsJid !== jid) {
         try {
-          return await client.sendMessage(cUsJid, payload, options);
+          return await client.sendMessage(cUsJid, payload, mergedOptions);
         } catch (_) {
           // fall through
         }
