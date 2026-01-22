@@ -30,12 +30,16 @@ const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
   ? path.resolve(process.env.WWEBJS_AUTH_DIR)
   : path.join(__dirname, 'auth');
 
+function getSessionDir() {
+  return path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
+}
+
 let didCleanupSingletonLocks = false;
 async function cleanupChromiumSingletonLocks() {
   if (didCleanupSingletonLocks) return;
   didCleanupSingletonLocks = true;
 
-  const sessionDir = path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
+  const sessionDir = getSessionDir();
   const files = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
 
   try {
@@ -419,6 +423,49 @@ app.post('/restart', requireApiKey, async (_req, res) => {
       scheduleReinit(500);
     }, 200);
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+// Logout endpoint (secured)
+// - By default: logs out (best-effort) and restarts the client.
+// - Optional: wipe the persisted auth session folder to force a fresh QR.
+//   To enable wiping, set WA_ALLOW_WIPE_AUTH=1 in env.
+app.post('/logout', requireApiKey, async (req, res) => {
+  const wantWipe = String(req.query?.wipe || '').trim() === '1';
+  const allowWipe = String(process.env.WA_ALLOW_WIPE_AUTH || '').trim() === '1';
+
+  try {
+    isClientReady = false;
+    lastState = 'LOGGING_OUT';
+    lastQr = null;
+
+    // Best-effort logout (not always supported depending on web version)
+    try {
+      if (typeof client.logout === 'function') await client.logout();
+    } catch (_) {}
+
+    try {
+      await client.destroy();
+    } catch (_) {}
+
+    let wiped = false;
+    if (wantWipe) {
+      if (!allowWipe) {
+        return res.status(403).json({ ok: false, error: 'wipe_not_allowed', hint: 'Set WA_ALLOW_WIPE_AUTH=1 to allow wipe=1' });
+      }
+      const sessionDir = getSessionDir();
+      try {
+        await fs.promises.rm(sessionDir, { recursive: true, force: true });
+        wiped = true;
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    scheduleReinit(500);
+    res.json({ ok: true, wiped });
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
