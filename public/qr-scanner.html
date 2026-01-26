@@ -251,12 +251,21 @@
     </div>
 
     <script>
-        const socket = io();
+        // Prefer websocket but allow polling fallback
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelay: 1000,
+            timeout: 20000,
+        });
         const statusEl = document.getElementById('status');
         const statusText = document.getElementById('statusText');
         const qrcodeEl = document.getElementById('qrcode');
         const loadingSpinner = document.getElementById('loadingSpinner');
         const successMessage = document.getElementById('successMessage');
+
+        let lastQrValue = null;
 
         function updateStatus(state, text) {
             statusEl.className = `status ${state}`;
@@ -269,26 +278,16 @@
             successMessage.style.display = 'none';
         }
 
-        // Événements Socket.IO
-        socket.on('connect', () => {
-            console.log('Connecté au serveur Socket.IO');
-            updateStatus('init', 'Connexion au serveur...');
-            loadingSpinner.style.display = 'block';
-        });
-
-        socket.on('qr', (qr) => {
-            console.log('QR Code reçu');
+        function renderQR(qr) {
+            if (!qr) return;
+            if (qr === lastQrValue) return;
+            lastQrValue = qr;
             updateStatus('qr', 'Scannez le QR Code avec WhatsApp');
             clearQR();
-            
-            // Générer le QR code
-            QRCode.toCanvas(qr, { 
+            QRCode.toCanvas(qr, {
                 width: 280,
                 margin: 2,
-                color: {
-                    dark: '#000000',
-                    light: '#FFFFFF'
-                }
+                color: { dark: '#000000', light: '#FFFFFF' }
             }, (err, canvas) => {
                 if (err) {
                     console.error('Erreur génération QR:', err);
@@ -297,6 +296,45 @@
                 }
                 qrcodeEl.appendChild(canvas);
             });
+        }
+
+        async function pollStatusAndQr() {
+            try {
+                const st = await fetch('/status', { cache: 'no-store' }).then(r => r.json());
+                if (st && st.ready) {
+                    updateStatus('ready', '✓ WhatsApp connecté');
+                    clearQR();
+                    successMessage.style.display = 'block';
+                    return;
+                }
+
+                // If not ready, try fetch QR
+                updateStatus('init', 'En attente du QR...');
+                loadingSpinner.style.display = 'block';
+
+                const qrResp = await fetch('/qr', { cache: 'no-store' });
+                if (qrResp.ok) {
+                    const data = await qrResp.json();
+                    renderQR(data.qr);
+                }
+            } catch (e) {
+                // Network/proxy issues: keep UI but don't crash
+                updateStatus('error', 'Connexion instable (retry...)');
+            }
+        }
+
+        // Événements Socket.IO
+        socket.on('connect', () => {
+            console.log('Connecté au serveur Socket.IO');
+            updateStatus('init', 'Connexion au serveur...');
+            loadingSpinner.style.display = 'block';
+            // Immediate refresh once socket connects
+            pollStatusAndQr();
+        });
+
+        socket.on('qr', (qr) => {
+            console.log('QR Code reçu');
+            renderQR(qr);
         });
 
         socket.on('ready', () => {
@@ -327,6 +365,10 @@
             console.log('Socket reconnecté');
             location.reload();
         });
+
+        // Fallback polling (works even if Socket.IO is blocked)
+        pollStatusAndQr();
+        setInterval(pollStatusAndQr, 3000);
     </script>
 </body>
 </html>

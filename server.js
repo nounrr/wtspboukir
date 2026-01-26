@@ -12,7 +12,15 @@ const waLogs = require('./logs');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = socketIo(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+  // Be more tolerant of slow networks / proxies
+  pingTimeout: 60000,
+  pingInterval: 25000,
+});
 
 // Security: simple API key protection for send endpoints
 // Accept both WA_API_KEY and legacy WHTSP_SERVICE_API_KEY for flexibility
@@ -746,7 +754,8 @@ app.post('/send-template', requireApiKey, async (req, res) => {
 })();
 
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '127.0.0.1';
+// Default to 0.0.0.0 so the QR page + Socket.IO work remotely without env tweaks
+const HOST = process.env.HOST || '0.0.0.0';
 
 server.listen(PORT, HOST, () => {
   console.log(`Serveur démarré sur http://${HOST}:${PORT}`);
