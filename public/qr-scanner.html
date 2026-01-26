@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WhatsApp QR Scanner</title>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -280,22 +279,31 @@
 
         function renderQR(qr) {
             if (!qr) return;
-            if (qr === lastQrValue) return;
+            if (qr === lastQrValue) {
+                // Still refresh the image to avoid stale cache
+                const img = document.getElementById('qrImg');
+                if (img) img.src = `/qr.png?t=${Date.now()}`;
+                return;
+            }
             lastQrValue = qr;
             updateStatus('qr', 'Scannez le QR Code avec WhatsApp');
             clearQR();
-            QRCode.toCanvas(qr, {
-                width: 280,
-                margin: 2,
-                color: { dark: '#000000', light: '#FFFFFF' }
-            }, (err, canvas) => {
-                if (err) {
-                    console.error('Erreur génération QR:', err);
-                    updateStatus('error', 'Erreur lors de la génération du QR Code');
-                    return;
-                }
-                qrcodeEl.appendChild(canvas);
-            });
+
+            const img = document.createElement('img');
+            img.id = 'qrImg';
+            img.alt = 'QR Code WhatsApp';
+            img.style.width = '280px';
+            img.style.height = '280px';
+            img.style.display = 'block';
+            img.style.background = '#fff';
+            img.style.padding = '10px';
+            img.style.borderRadius = '10px';
+            img.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
+            img.src = `/qr.png?t=${Date.now()}`;
+            img.onerror = () => {
+                updateStatus('error', 'Impossible de charger /qr.png');
+            };
+            qrcodeEl.appendChild(img);
         }
 
         async function pollStatusAndQr() {

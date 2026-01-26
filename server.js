@@ -8,6 +8,7 @@ const socketIo = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const qrcodeTerminal = require('qrcode-terminal');
+const qrcode = require('qrcode');
 const waLogs = require('./logs');
 
 const app = express();
@@ -402,6 +403,25 @@ app.get('/check-number', requireApiKey, async (req, res) => {
 app.get('/qr', (_req, res) => {
   if (!lastQr) return res.status(404).json({ error: 'no_qr' });
   res.json({ qr: lastQr });
+});
+
+// QR as PNG (more reliable than client-side QR libs / CDNs)
+app.get('/qr.png', async (_req, res) => {
+  try {
+    if (!lastQr) return res.status(404).json({ error: 'no_qr' });
+    const png = await qrcode.toBuffer(lastQr, {
+      type: 'png',
+      width: 320,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#000000', light: '#FFFFFF' },
+    });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(png);
+  } catch (e) {
+    res.status(500).json({ error: 'qr_png_failed', detail: String(e?.message || e) });
+  }
 });
 
 // Page QR Scanner - Interface visuelle pour scanner le QR Code
