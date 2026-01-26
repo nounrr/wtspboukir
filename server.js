@@ -396,6 +396,25 @@ app.get('/qr', (_req, res) => {
   res.json({ qr: lastQr });
 });
 
+// Page QR Scanner - Interface visuelle pour scanner le QR Code
+app.get('/scanner', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'qr-scanner.html'));
+});
+
+// Redirect root to scanner page if not ready, otherwise show status
+app.get('/', (_req, res) => {
+  if (isClientReady) {
+    res.json({ 
+      ok: true, 
+      status: 'ready',
+      message: 'WhatsApp is connected and ready',
+      readyAt: lastReadyAt 
+    });
+  } else {
+    res.redirect('/scanner');
+  }
+});
+
 // Logs (HTML + JSON) - secured via API key (header x-api-key or ?key=...)
 app.get('/logs.json', requireApiKey, async (req, res) => {
   try {
