@@ -11,6 +11,16 @@ const qrcodeTerminal = require('qrcode-terminal');
 const qrcode = require('qrcode');
 const waLogs = require('./logs');
 
+// Diagnostics (helps debug "INIT" stuck / no QR)
+let initCount = 0;
+let lastInitAt = null;
+let lastInitError = null;
+let lastQrAt = null;
+let lastAuthAt = null;
+let lastDisconnectAt = null;
+let lastDisconnectReason = null;
+let lastLoading = null;
+
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
@@ -42,6 +52,13 @@ const WWEBJS_CLIENT_ID = process.env.WWEBJS_CLIENT_ID || 'default';
 const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
   ? path.resolve(process.env.WWEBJS_AUTH_DIR)
   : path.join(__dirname, 'auth');
+
+// Only use CHROME_PATH if it exists; a wrong path will prevent Puppeteer from using bundled Chromium.
+const CHROME_PATH = (process.env.CHROME_PATH || '').trim();
+const CHROME_PATH_EXISTS = !!(CHROME_PATH && fs.existsSync(CHROME_PATH));
+if (CHROME_PATH && !CHROME_PATH_EXISTS) {
+  console.warn(`CHROME_PATH is set but not found: ${CHROME_PATH} (will ignore and use Puppeteer default)`);
+}
 
 function getSessionDir() {
   return path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
@@ -85,7 +102,7 @@ const client = new Client({
   puppeteer: {
     headless: true,
     // If Chrome is installed locally, you can set CHROME_PATH env to its executable
-    executablePath: process.env.CHROME_PATH,
+    executablePath: CHROME_PATH_EXISTS ? CHROME_PATH : undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -108,13 +125,58 @@ let lastQr = null;
 let lastState = 'INIT';
 let lastReadyAt = null;
 let reinitTimer = null;
+
+async function ensureAuthDirIsWritable() {
+  try {
+    await fs.promises.mkdir(WWEBJS_AUTH_DIR, { recursive: true });
+    const probe = path.join(WWEBJS_AUTH_DIR, `.write-test-${process.pid}-${Date.now()}`);
+    await fs.promises.writeFile(probe, 'ok', 'utf8');
+    await fs.promises.unlink(probe);
+    return true;
+  } catch (e) {
+    console.error('Auth dir is not writable:', WWEBJS_AUTH_DIR, e?.message || e);
+    lastInitError = `auth_dir_not_writable: ${String(e?.message || e)}`;
+    lastState = 'INIT_ERROR';
+    return false;
+  }
+}
+
+async function safeInitializeClient() {
+  initCount += 1;
+  lastInitAt = Date.now();
+  lastInitError = null;
+  lastLoading = null;
+  lastState = 'INITIALIZING';
+
+  const authOk = await ensureAuthDirIsWritable();
+  if (!authOk) {
+    scheduleReinit(8000);
+    return;
+  }
+
+  try {
+    await cleanupChromiumSingletonLocks();
+  } catch (_) {
+    // ignore
+  }
+
+  try {
+    // whatsapp-web.js initialize() is not guaranteed to return a promise across versions
+    await Promise.resolve(client.initialize());
+  } catch (e) {
+    lastInitError = String(e?.message || e);
+    lastState = 'INIT_ERROR';
+    console.error('client.initialize() failed:', lastInitError);
+    scheduleReinit(8000);
+  }
+}
 function scheduleReinit(delayMs = 3000) {
   if (reinitTimer) return;
   reinitTimer = setTimeout(() => {
     reinitTimer = null;
     try {
       console.log('Reinitialisation du client WhatsApp...');
-      client.initialize();
+      safeInitializeClient();
     } catch (e) {
       console.warn('Erreur lors de la réinitialisation:', e?.message);
     }
@@ -138,6 +200,7 @@ client.on('qr', (qr) => {
   console.log('QR Code généré');
   isClientReady = false;
   lastQr = qr;
+  lastQrAt = Date.now();
   lastState = 'QR';
   try {
     console.log('Scanne ce QR avec WhatsApp > Appareils liés (Linked devices):');
@@ -160,6 +223,7 @@ client.on('ready', () => {
 
 client.on('authenticated', () => {
   console.log('Authentifié ✅');
+  lastAuthAt = Date.now();
   // QR n'est plus pertinent après authentification
   lastQr = null;
   io.emit('authenticated');
@@ -169,6 +233,7 @@ client.on('auth_failure', (msg) => {
   console.error('Erreur d\'authentification :', msg);
   isClientReady = false;
   lastState = 'AUTH_FAILURE';
+  lastInitError = String(msg || 'auth_failure');
   io.emit('auth_failure', msg);
   scheduleReinit(5000);
 });
@@ -177,8 +242,20 @@ client.on('disconnected', (reason) => {
   console.log('Déconnecté :', reason);
   isClientReady = false;
   lastState = 'DISCONNECTED';
+  lastDisconnectAt = Date.now();
+  lastDisconnectReason = String(reason || 'unknown');
   io.emit('disconnected', reason);
   scheduleReinit(3000);
+});
+
+// Useful signal while booting (whatsapp-web.js emits this in many versions)
+client.on('loading_screen', (percent, message) => {
+  lastLoading = {
+    percent: typeof percent === 'number' ? percent : null,
+    message: message ? String(message) : null,
+    at: Date.now(),
+  };
+  if (!isClientReady && lastState !== 'QR') lastState = 'LOADING';
 });
 
 client.on('change_state', (state) => {
@@ -369,8 +446,42 @@ app.get('/status', async (_req, res) => {
     ready: state === 'CONNECTED',
     state,
     hasQr: !!lastQr,
+    initCount,
+    lastInitAt,
+    lastInitError,
+    lastQrAt,
     lastReadyAt,
+    lastAuthAt,
+    lastDisconnectAt,
+    lastDisconnectReason,
+    loading: lastLoading,
     now: Date.now()
+  });
+});
+
+// Lightweight diagnostics endpoint (no secrets)
+app.get('/debug', (_req, res) => {
+  res.json({
+    ok: true,
+    pid: process.pid,
+    node: process.version,
+    state: lastState,
+    ready: isClientReady,
+    hasQr: !!lastQr,
+    initCount,
+    lastInitAt,
+    lastInitError,
+    lastQrAt,
+    lastReadyAt,
+    lastAuthAt,
+    lastDisconnectAt,
+    lastDisconnectReason,
+    loading: lastLoading,
+    chromePathProvided: CHROME_PATH || null,
+    chromePathExists: CHROME_PATH_EXISTS,
+    authDir: WWEBJS_AUTH_DIR,
+    sessionDir: getSessionDir(),
+    now: Date.now(),
   });
 });
 
@@ -785,10 +896,8 @@ app.post('/send-template', requireApiKey, async (req, res) => {
 });
 
 (async () => {
-  // If the process previously crashed, Chromium can leave a SingletonLock in the
-  // session profile folder and refuse to start. Clean it once on startup.
-  await cleanupChromiumSingletonLocks();
-  client.initialize();
+  // Boot WhatsApp client with diagnostics + permission checks.
+  await safeInitializeClient();
 })();
 
 const PORT = process.env.PORT || 3000;
@@ -812,6 +921,12 @@ server.on('error', (err) => {
 // Global error guards: keep process alive and try reinit
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
+  try {
+    lastInitError = String(reason?.message || reason?.toString?.() || reason || 'unhandledRejection');
+    if (lastState === 'INIT' || lastState === 'INITIALIZING' || lastState === 'LOADING') {
+      lastState = 'INIT_ERROR';
+    }
+  } catch (_) {}
   const msg = (reason?.message || reason?.toString?.() || '').toLowerCase();
   if (msg.includes('failed to launch the browser process') || msg.includes('processsingleton')) {
     cleanupChromiumSingletonLocks()

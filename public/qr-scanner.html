@@ -316,13 +316,24 @@
                     return;
                 }
 
+                const stateLabel = (st && st.state) ? String(st.state) : 'UNKNOWN';
+                const initErr = (st && st.lastInitError) ? String(st.lastInitError) : '';
+                if (initErr) {
+                    updateStatus('error', `Erreur init: ${initErr}`);
+                } else if (stateLabel === 'INIT' || stateLabel === 'INITIALIZING') {
+                    updateStatus('init', 'Démarrage de WhatsApp (INIT)...');
+                } else if (stateLabel === 'LOADING') {
+                    updateStatus('init', 'Chargement WhatsApp Web...');
+                } else {
+                    updateStatus('init', `En attente du QR... (${stateLabel})`);
+                }
+
                 // If not ready, try fetch QR
-                updateStatus('init', 'En attente du QR...');
                 loadingSpinner.style.display = 'block';
 
                 const qrResp = await fetch('/qr', { cache: 'no-store' });
-                if (qrResp.ok) {
-                    const data = await qrResp.json();
+                const data = await qrResp.json().catch(() => null);
+                if (data && data.ok && data.qr) {
                     renderQR(data.qr);
                 }
             } catch (e) {
