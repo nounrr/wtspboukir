@@ -401,8 +401,26 @@ app.get('/check-number', requireApiKey, async (req, res) => {
 });
 
 app.get('/qr', (_req, res) => {
-  if (!lastQr) return res.status(404).json({ error: 'no_qr' });
-  res.json({ qr: lastQr });
+  if (!lastQr) {
+    return res.json({
+      ok: false,
+      error: 'no_qr',
+      state: lastState,
+      ready: lastState === 'CONNECTED',
+      hasQr: false,
+      lastReadyAt,
+      now: Date.now()
+    });
+  }
+  res.json({
+    ok: true,
+    qr: lastQr,
+    state: lastState,
+    ready: lastState === 'CONNECTED',
+    hasQr: true,
+    lastReadyAt,
+    now: Date.now()
+  });
 });
 
 // QR as PNG (more reliable than client-side QR libs / CDNs)
