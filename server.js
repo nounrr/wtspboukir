@@ -155,6 +155,23 @@ async function safeInitializeClient() {
   lastLoading = null;
   lastState = 'INITIALIZING';
 
+  try {
+    const puppeteerPkg = (() => {
+      try {
+        // whatsapp-web.js depends on puppeteer, but environments vary
+        // eslint-disable-next-line global-require
+        return require('puppeteer/package.json');
+      } catch (_) {
+        return null;
+      }
+    })();
+    console.log(
+      `[WA:init] attempt=${initCount} chromePath=${CHROME_PATH || '(none)'} chromePathExists=${CHROME_PATH_EXISTS} authDir=${WWEBJS_AUTH_DIR} clientId=${WWEBJS_CLIENT_ID} puppeteer=${puppeteerPkg?.version || 'unknown'}`
+    );
+  } catch (_) {
+    // ignore
+  }
+
   if (initWatchdogTimer) {
     clearTimeout(initWatchdogTimer);
     initWatchdogTimer = null;
