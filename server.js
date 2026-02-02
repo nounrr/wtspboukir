@@ -59,6 +59,34 @@ const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
   ? path.resolve(process.env.WWEBJS_AUTH_DIR)
   : path.join(__dirname, 'auth');
 
+// If initialize() gets stuck, it is often Puppeteer/Chrome hanging on launch.
+// Set explicit launch timeouts so we get an error instead of silent INITIALIZING forever.
+const PUPPETEER_LAUNCH_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.WA_PUPPETEER_LAUNCH_TIMEOUT_MS || 45000);
+  return Number.isFinite(raw) ? Math.max(5000, Math.min(5 * 60 * 1000, raw)) : 45000;
+})();
+const PUPPETEER_PROTOCOL_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.WA_PUPPETEER_PROTOCOL_TIMEOUT_MS || 60000);
+  return Number.isFinite(raw) ? Math.max(5000, Math.min(10 * 60 * 1000, raw)) : 60000;
+})();
+const PUPPETEER_DUMPIO = String(process.env.WA_PUPPETEER_DUMPIO || '').trim() === '1';
+
+// WhatsApp web version cache
+// On some VPS networks, fetching the remote version file can hang; allow disabling.
+const WA_WEB_VERSION_CACHE = (process.env.WA_WEB_VERSION_CACHE || 'remote').toString().trim().toLowerCase();
+const WEB_VERSION_REMOTE_DEFAULT = 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json';
+const WEB_VERSION_REMOTE = process.env.WEB_VERSION_REMOTE || WEB_VERSION_REMOTE_DEFAULT;
+const webVersionCacheOption = (() => {
+  if (WA_WEB_VERSION_CACHE === 'none' || WA_WEB_VERSION_CACHE === 'off' || WA_WEB_VERSION_CACHE === 'disabled') {
+    return { type: 'none' };
+  }
+  if (WA_WEB_VERSION_CACHE === 'remote') {
+    return { type: 'remote', remotePath: WEB_VERSION_REMOTE };
+  }
+  // Unknown value -> safe fallback
+  return { type: 'none' };
+})();
+
 // Only use CHROME_PATH if it exists; a wrong path will prevent Puppeteer from using bundled Chromium.
 const CHROME_PATH = (process.env.CHROME_PATH || '').trim();
 const CHROME_PATH_EXISTS = !!(CHROME_PATH && fs.existsSync(CHROME_PATH));
@@ -109,6 +137,9 @@ const client = new Client({
     headless: true,
     // If Chrome is installed locally, you can set CHROME_PATH env to its executable
     executablePath: CHROME_PATH_EXISTS ? CHROME_PATH : undefined,
+    timeout: PUPPETEER_LAUNCH_TIMEOUT_MS,
+    protocolTimeout: PUPPETEER_PROTOCOL_TIMEOUT_MS,
+    dumpio: PUPPETEER_DUMPIO,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -120,10 +151,7 @@ const client = new Client({
     ]
   },
   // Keep the web version in sync to reduce random session closes
-  webVersionCache: {
-    type: 'remote',
-    remotePath: process.env.WEB_VERSION_REMOTE || 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json'
-  }
+  webVersionCache: webVersionCacheOption
 });
 
 let isClientReady = false;
@@ -552,6 +580,11 @@ app.get('/debug', (_req, res) => {
     loading: lastLoading,
     chromePathProvided: CHROME_PATH || null,
     chromePathExists: CHROME_PATH_EXISTS,
+    puppeteerLaunchTimeoutMs: PUPPETEER_LAUNCH_TIMEOUT_MS,
+    puppeteerProtocolTimeoutMs: PUPPETEER_PROTOCOL_TIMEOUT_MS,
+    puppeteerDumpio: PUPPETEER_DUMPIO,
+    waWebVersionCache: WA_WEB_VERSION_CACHE,
+    webVersionRemote: WEB_VERSION_REMOTE,
     authDir: WWEBJS_AUTH_DIR,
     sessionDir: getSessionDir(),
     now: Date.now(),
