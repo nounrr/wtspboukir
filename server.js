@@ -20,6 +20,12 @@ let lastAuthAt = null;
 let lastDisconnectAt = null;
 let lastDisconnectReason = null;
 let lastLoading = null;
+let initStartedAt = null;
+let initWatchdogTimer = null;
+const INIT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.WA_INIT_TIMEOUT_MS || 45000);
+  return Number.isFinite(raw) ? Math.max(5000, Math.min(5 * 60 * 1000, raw)) : 45000;
+})();
 
 const app = express();
 const server = http.createServer(app);
@@ -144,9 +150,27 @@ async function ensureAuthDirIsWritable() {
 async function safeInitializeClient() {
   initCount += 1;
   lastInitAt = Date.now();
+  initStartedAt = lastInitAt;
   lastInitError = null;
   lastLoading = null;
   lastState = 'INITIALIZING';
+
+  if (initWatchdogTimer) {
+    clearTimeout(initWatchdogTimer);
+    initWatchdogTimer = null;
+  }
+  const thisInitAt = initStartedAt;
+  initWatchdogTimer = setTimeout(() => {
+    // If we’re still not ready and no QR after N ms, treat as hung browser start.
+    const stillSameAttempt = initStartedAt === thisInitAt;
+    const stillBooting = !isClientReady && !lastQr && (lastState === 'INITIALIZING' || lastState === 'LOADING');
+    if (stillSameAttempt && stillBooting) {
+      lastInitError = `init_timeout_${INIT_TIMEOUT_MS}ms`;
+      lastState = 'INIT_ERROR';
+      console.error(`WhatsApp init timed out after ${INIT_TIMEOUT_MS}ms; scheduling reinit`);
+      scheduleReinit(2000);
+    }
+  }, INIT_TIMEOUT_MS);
 
   const authOk = await ensureAuthDirIsWritable();
   if (!authOk) {
@@ -170,13 +194,25 @@ async function safeInitializeClient() {
     scheduleReinit(8000);
   }
 }
+
+async function safeReinitClient() {
+  try {
+    // Best-effort: destroy existing puppeteer/session if a previous init is hung
+    if (typeof client.destroy === 'function') {
+      await Promise.resolve(client.destroy());
+    }
+  } catch (_) {
+    // ignore
+  }
+  await safeInitializeClient();
+}
 function scheduleReinit(delayMs = 3000) {
   if (reinitTimer) return;
   reinitTimer = setTimeout(() => {
     reinitTimer = null;
     try {
       console.log('Reinitialisation du client WhatsApp...');
-      safeInitializeClient();
+      safeReinitClient();
     } catch (e) {
       console.warn('Erreur lors de la réinitialisation:', e?.message);
     }
@@ -202,6 +238,10 @@ client.on('qr', (qr) => {
   lastQr = qr;
   lastQrAt = Date.now();
   lastState = 'QR';
+  if (initWatchdogTimer) {
+    clearTimeout(initWatchdogTimer);
+    initWatchdogTimer = null;
+  }
   try {
     console.log('Scanne ce QR avec WhatsApp > Appareils liés (Linked devices):');
     qrcodeTerminal.generate(qr, { small: true });
@@ -216,6 +256,10 @@ client.on('ready', () => {
   isClientReady = true;
   lastState = 'CONNECTED';
   lastReadyAt = Date.now();
+  if (initWatchdogTimer) {
+    clearTimeout(initWatchdogTimer);
+    initWatchdogTimer = null;
+  }
   // Une fois prêt, on n'a plus de QR actif
   lastQr = null;
   io.emit('ready');
@@ -234,6 +278,10 @@ client.on('auth_failure', (msg) => {
   isClientReady = false;
   lastState = 'AUTH_FAILURE';
   lastInitError = String(msg || 'auth_failure');
+  if (initWatchdogTimer) {
+    clearTimeout(initWatchdogTimer);
+    initWatchdogTimer = null;
+  }
   io.emit('auth_failure', msg);
   scheduleReinit(5000);
 });
@@ -244,6 +292,10 @@ client.on('disconnected', (reason) => {
   lastState = 'DISCONNECTED';
   lastDisconnectAt = Date.now();
   lastDisconnectReason = String(reason || 'unknown');
+  if (initWatchdogTimer) {
+    clearTimeout(initWatchdogTimer);
+    initWatchdogTimer = null;
+  }
   io.emit('disconnected', reason);
   scheduleReinit(3000);
 });
@@ -448,6 +500,8 @@ app.get('/status', async (_req, res) => {
     hasQr: !!lastQr,
     initCount,
     lastInitAt,
+    initStartedAt,
+    initTimeoutMs: INIT_TIMEOUT_MS,
     lastInitError,
     lastQrAt,
     lastReadyAt,
@@ -470,6 +524,8 @@ app.get('/debug', (_req, res) => {
     hasQr: !!lastQr,
     initCount,
     lastInitAt,
+    initStartedAt,
+    initTimeoutMs: INIT_TIMEOUT_MS,
     lastInitError,
     lastQrAt,
     lastReadyAt,
