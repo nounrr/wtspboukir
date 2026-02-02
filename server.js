@@ -22,10 +22,27 @@ let lastDisconnectReason = null;
 let lastLoading = null;
 let initStartedAt = null;
 let initWatchdogTimer = null;
+let pendingSessionWipe = false;
 const INIT_TIMEOUT_MS = (() => {
   const raw = Number(process.env.WA_INIT_TIMEOUT_MS || 45000);
   return Number.isFinite(raw) ? Math.max(5000, Math.min(5 * 60 * 1000, raw)) : 45000;
 })();
+
+// Dangerous but effective recovery: wipe LocalAuth session on init errors.
+// Enable only if you're OK with re-pairing by QR.
+const WA_AUTO_WIPE_AUTH = String(process.env.WA_AUTO_WIPE_AUTH || '').trim() === '1';
+
+function shouldWipeSessionForError(err) {
+  const m = String(err || '').toLowerCase();
+  return (
+    m.includes('target closed') ||
+    m.includes('database is locked') ||
+    (m.includes('failed to open') && m.includes('database')) ||
+    (m.includes('gcm store') && m.includes('lock')) ||
+    m.includes('lockfile') ||
+    (m.includes('leveldb') && m.includes('corruption'))
+  );
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -123,6 +140,23 @@ async function cleanupChromiumSingletonLocks() {
   }
 }
 
+async function wipeSessionDirIfPending(reason) {
+  if (!pendingSessionWipe) return false;
+  pendingSessionWipe = false;
+
+  const sessionDir = getSessionDir();
+  try {
+    console.warn(`[WA:wipe] Removing session dir due to: ${reason || 'unknown'}`);
+    await fs.promises.rm(sessionDir, { recursive: true, force: true });
+    return true;
+  } catch (e) {
+    console.error('[WA:wipe] Failed to remove session dir:', sessionDir, e?.message || e);
+    // Retry on next init
+    pendingSessionWipe = true;
+    return false;
+  }
+}
+
 const client = new Client({
   authStrategy: new LocalAuth({
     clientId: WWEBJS_CLIENT_ID,
@@ -213,6 +247,12 @@ async function safeInitializeClient() {
       lastInitError = `init_timeout_${INIT_TIMEOUT_MS}ms`;
       lastState = 'INIT_ERROR';
       console.error(`WhatsApp init timed out after ${INIT_TIMEOUT_MS}ms; scheduling reinit`);
+
+      if (WA_AUTO_WIPE_AUTH) {
+        // A timeout commonly happens when the Chrome profile is locked/corrupted.
+        pendingSessionWipe = true;
+      }
+
       scheduleReinit(2000);
     }
   }, INIT_TIMEOUT_MS);
@@ -221,6 +261,10 @@ async function safeInitializeClient() {
   if (!authOk) {
     scheduleReinit(8000);
     return;
+  }
+
+  if (WA_AUTO_WIPE_AUTH) {
+    await wipeSessionDirIfPending(lastInitError || 'previous_init_error');
   }
 
   try {
@@ -236,6 +280,12 @@ async function safeInitializeClient() {
     lastInitError = String(e?.message || e);
     lastState = 'INIT_ERROR';
     console.error('client.initialize() failed:', lastInitError);
+
+    if (WA_AUTO_WIPE_AUTH && shouldWipeSessionForError(lastInitError)) {
+      pendingSessionWipe = true;
+      console.warn('[WA:init] Detected locked/corrupt profile; will wipe session on next init');
+    }
+
     scheduleReinit(8000);
   }
 }
@@ -585,6 +635,8 @@ app.get('/debug', (_req, res) => {
     puppeteerDumpio: PUPPETEER_DUMPIO,
     waWebVersionCache: WA_WEB_VERSION_CACHE,
     webVersionRemote: WEB_VERSION_REMOTE,
+    autoWipeAuthEnabled: WA_AUTO_WIPE_AUTH,
+    pendingSessionWipe,
     authDir: WWEBJS_AUTH_DIR,
     sessionDir: getSessionDir(),
     now: Date.now(),
