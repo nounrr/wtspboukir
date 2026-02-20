@@ -8,6 +8,7 @@ module.exports = {
       instances: 1,
       watch: false,
       autorestart: true,
+      kill_timeout: 20000,
       max_restarts: 50,
       min_uptime: '15s',
       exp_backoff_restart_delay: 2000,

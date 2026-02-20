@@ -76,6 +76,14 @@ const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
   ? path.resolve(process.env.WWEBJS_AUTH_DIR)
   : path.join(__dirname, 'auth');
 
+// Prevent multiple processes (PM2 reloads, accidental double-start) from using the same
+// Chromium profile directory, which causes: "database is locked", IndexedDB corruption, etc.
+const WA_SESSION_LOCK_ENABLED = String(process.env.WA_SESSION_LOCK || '1').trim() !== '0';
+const WA_SESSION_LOCK_RETRY_MS = (() => {
+  const raw = Number(process.env.WA_SESSION_LOCK_RETRY_MS || 15000);
+  return Number.isFinite(raw) ? Math.max(1000, Math.min(5 * 60 * 1000, raw)) : 15000;
+})();
+
 // If initialize() gets stuck, it is often Puppeteer/Chrome hanging on launch.
 // Set explicit launch timeouts so we get an error instead of silent INITIALIZING forever.
 const PUPPETEER_LAUNCH_TIMEOUT_MS = (() => {
@@ -115,11 +123,114 @@ function getSessionDir() {
   return path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
 }
 
-let didCleanupSingletonLocks = false;
-async function cleanupChromiumSingletonLocks() {
-  if (didCleanupSingletonLocks) return;
-  didCleanupSingletonLocks = true;
+function getSessionLockPath() {
+  return path.join(getSessionDir(), 'service.lock.json');
+}
 
+function isPidAlive(pid) {
+  if (!pid || typeof pid !== 'number') return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: process exists but we can't signal it => treat as alive
+    if (e && (e.code === 'EPERM' || e.code === 'EACCES')) return true;
+    return false;
+  }
+}
+
+let sessionLockAcquired = false;
+let sessionLockInfo = null;
+
+async function acquireSessionLock() {
+  if (!WA_SESSION_LOCK_ENABLED) return { ok: true, skipped: true };
+  if (sessionLockAcquired) return { ok: true };
+
+  const sessionDir = getSessionDir();
+  const lockPath = getSessionLockPath();
+
+  await fs.promises.mkdir(sessionDir, { recursive: true });
+
+  const lockPayload = {
+    pid: process.pid,
+    startedAt: Date.now(),
+    clientId: WWEBJS_CLIENT_ID,
+    authDir: WWEBJS_AUTH_DIR,
+    host: process.env.HOSTNAME || null,
+    pm2: {
+      pm_id: process.env.pm_id ?? null,
+      name: process.env.name ?? null,
+      instance: process.env.NODE_APP_INSTANCE ?? null,
+    },
+  };
+
+  try {
+    const handle = await fs.promises.open(lockPath, 'wx');
+    await handle.writeFile(JSON.stringify(lockPayload, null, 2), 'utf8');
+    await handle.close();
+    sessionLockAcquired = true;
+    sessionLockInfo = lockPayload;
+    return { ok: true };
+  } catch (e) {
+    if (e && e.code !== 'EEXIST') throw e;
+
+    // Lock exists: check if it's stale.
+    try {
+      const raw = await fs.promises.readFile(lockPath, 'utf8');
+      const existing = JSON.parse(raw);
+      const pid = Number(existing?.pid);
+
+      if (isPidAlive(pid)) {
+        return { ok: false, reason: 'lock_held', heldBy: existing };
+      }
+
+      // Stale lock file: remove and retry once
+      await fs.promises.unlink(lockPath);
+      const handle2 = await fs.promises.open(lockPath, 'wx');
+      await handle2.writeFile(JSON.stringify(lockPayload, null, 2), 'utf8');
+      await handle2.close();
+      sessionLockAcquired = true;
+      sessionLockInfo = lockPayload;
+      return { ok: true, staleRecovered: true };
+    } catch (e2) {
+      // If anything goes wrong reading/parsing/unlinking, assume lock is held.
+      return { ok: false, reason: 'lock_unknown' };
+    }
+  }
+}
+
+async function releaseSessionLock() {
+  if (!WA_SESSION_LOCK_ENABLED) return;
+  if (!sessionLockAcquired) return;
+  const lockPath = getSessionLockPath();
+  sessionLockAcquired = false;
+  sessionLockInfo = null;
+  try {
+    await fs.promises.unlink(lockPath);
+  } catch (_) {
+    // ignore
+  }
+}
+
+// Serialize all init/destroy/reinit calls to avoid launching multiple Chromiums in parallel.
+let lifecycleChain = Promise.resolve();
+function enqueueLifecycle(label, fn) {
+  lifecycleChain = lifecycleChain
+    .then(async () => {
+      try {
+        return await fn();
+      } catch (e) {
+        console.error(`[WA:lifecycle] ${label} failed:`, e?.message || e);
+        throw e;
+      }
+    })
+    .catch(() => {
+      // Swallow to keep the chain alive for future retries
+    });
+  return lifecycleChain;
+}
+
+async function cleanupChromiumSingletonLocks() {
   const sessionDir = getSessionDir();
   const files = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
 
@@ -129,6 +240,7 @@ async function cleanupChromiumSingletonLocks() {
     return; // No session dir yet
   }
 
+  // 1) Remove top-level Chromium singleton locks
   for (const f of files) {
     const p = path.join(sessionDir, f);
     try {
@@ -136,6 +248,31 @@ async function cleanupChromiumSingletonLocks() {
       console.log(`Removed stale Chromium lock: ${p}`);
     } catch (e) {
       // Ignore if not present or cannot delete
+    }
+  }
+
+  // 2) Recursively remove LevelDB LOCK files that cause "database is locked" errors
+  await removeLevelDBLocks(sessionDir);
+}
+
+async function removeLevelDBLocks(dir) {
+  let entries;
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch (_) {
+    return;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await removeLevelDBLocks(fullPath);
+    } else if (entry.name === 'LOCK') {
+      try {
+        await fs.promises.unlink(fullPath);
+        console.log(`Removed stale LevelDB lock: ${fullPath}`);
+      } catch (_) {
+        // ignore
+      }
     }
   }
 }
@@ -180,8 +317,15 @@ const client = new Client({
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-zygote',
+      '--single-process',
       '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding'
+      '--disable-renderer-backgrounding',
+      '--disable-features=TranslateUI',
+      '--disable-extensions',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-default-apps',
+      '--disable-breakpad',
+      '--no-first-run'
     ]
   },
   // Keep the web version in sync to reduce random session closes
@@ -263,6 +407,25 @@ async function safeInitializeClient() {
     return;
   }
 
+  // Acquire cross-process lock before touching the Chromium profile.
+  try {
+    const lock = await acquireSessionLock();
+    if (!lock.ok) {
+      const held = lock.heldBy ? ` pid=${lock.heldBy?.pid} startedAt=${lock.heldBy?.startedAt}` : '';
+      lastInitError = `session_lock_${lock.reason || 'blocked'}${held}`;
+      lastState = 'LOCKED';
+      console.error(`[WA:lock] Session is in use by another process.${held}`);
+      scheduleReinit(WA_SESSION_LOCK_RETRY_MS);
+      return;
+    }
+  } catch (e) {
+    lastInitError = `session_lock_failed: ${String(e?.message || e)}`;
+    lastState = 'INIT_ERROR';
+    console.error('[WA:lock] Failed to acquire session lock:', e?.message || e);
+    scheduleReinit(8000);
+    return;
+  }
+
   if (WA_AUTO_WIPE_AUTH) {
     await wipeSessionDirIfPending(lastInitError || 'previous_init_error');
   }
@@ -290,6 +453,33 @@ async function safeInitializeClient() {
   }
 }
 
+async function killOrphanChromeProcesses() {
+  // On Linux, kill any orphaned chrome/chromium processes spawned by this service
+  if (process.platform !== 'linux' && process.platform !== 'darwin') return;
+  try {
+    const { execSync } = require('child_process');
+    // Find chrome processes whose parent is this node process or whose session dir matches
+    const sessionDir = getSessionDir();
+    const pids = execSync(
+      `pgrep -f "${sessionDir.replace(/'/g, '')}" 2>/dev/null || true`,
+      { encoding: 'utf8', timeout: 5000 }
+    ).trim();
+    if (pids) {
+      for (const pid of pids.split('\n').filter(Boolean)) {
+        const n = Number(pid);
+        if (n && n !== process.pid) {
+          try {
+            process.kill(n, 'SIGKILL');
+            console.log(`[WA:cleanup] Killed orphan chrome pid=${n}`);
+          } catch (_) { /* already dead */ }
+        }
+      }
+    }
+  } catch (_) {
+    // ignore
+  }
+}
+
 async function safeReinitClient() {
   try {
     // Best-effort: destroy existing puppeteer/session if a previous init is hung
@@ -299,6 +489,16 @@ async function safeReinitClient() {
   } catch (_) {
     // ignore
   }
+
+  // Kill any orphaned Chrome processes left from previous crashed attempts
+  await killOrphanChromeProcesses();
+
+  // Release the session lock so safeInitializeClient can re-acquire it cleanly
+  await releaseSessionLock();
+
+  // Small delay to let OS release file handles
+  await new Promise(r => setTimeout(r, 1000));
+
   await safeInitializeClient();
 }
 function scheduleReinit(delayMs = 3000) {
@@ -307,7 +507,7 @@ function scheduleReinit(delayMs = 3000) {
     reinitTimer = null;
     try {
       console.log('Reinitialisation du client WhatsApp...');
-      safeReinitClient();
+      enqueueLifecycle('reinit', safeReinitClient);
     } catch (e) {
       console.warn('Erreur lors de la réinitialisation:', e?.message);
     }
@@ -639,6 +839,10 @@ app.get('/debug', (_req, res) => {
     pendingSessionWipe,
     authDir: WWEBJS_AUTH_DIR,
     sessionDir: getSessionDir(),
+    sessionLockEnabled: WA_SESSION_LOCK_ENABLED,
+    sessionLockPath: getSessionLockPath(),
+    sessionLockAcquired,
+    sessionLockInfo,
     now: Date.now(),
   });
 });
@@ -1055,7 +1259,7 @@ app.post('/send-template', requireApiKey, async (req, res) => {
 
 (async () => {
   // Boot WhatsApp client with diagnostics + permission checks.
-  await safeInitializeClient();
+  await enqueueLifecycle('init', safeInitializeClient);
 })();
 
 const PORT = process.env.PORT || 3000;
@@ -1075,6 +1279,34 @@ server.on('error', (err) => {
   }
   process.exit(1);
 });
+
+async function gracefulShutdown(signal) {
+  try {
+    console.warn(`[WA] Received ${signal}, shutting down...`);
+    if (reinitTimer) {
+      clearTimeout(reinitTimer);
+      reinitTimer = null;
+    }
+    if (initWatchdogTimer) {
+      clearTimeout(initWatchdogTimer);
+      initWatchdogTimer = null;
+    }
+
+    // Ensure any in-flight lifecycle op finishes, then destroy.
+    await lifecycleChain;
+    try {
+      if (typeof client.destroy === 'function') {
+        await Promise.resolve(client.destroy());
+      }
+    } catch (_) {}
+    await releaseSessionLock();
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Global error guards: keep process alive and try reinit
 process.on('unhandledRejection', (reason) => {
