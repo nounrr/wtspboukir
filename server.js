@@ -300,36 +300,26 @@ const client = new Client({
     // Persist auth in a stable folder to avoid session loss
     dataPath: WWEBJS_AUTH_DIR,
   }),
-  restartOnAuthFail: true,
-  takeoverOnConflict: true,
-  takeoverTimeoutMs: 60000,
   qrMaxRetries: 5,
+  authTimeoutMs: 60000,
   puppeteer: {
     headless: true,
     // If Chrome is installed locally, you can set CHROME_PATH env to its executable
     executablePath: CHROME_PATH_EXISTS ? CHROME_PATH : undefined,
-    timeout: PUPPETEER_LAUNCH_TIMEOUT_MS,
-    protocolTimeout: PUPPETEER_PROTOCOL_TIMEOUT_MS,
-    dumpio: PUPPETEER_DUMPIO,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--no-zygote',
-      '--single-process',
-      '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding',
-      '--disable-features=TranslateUI',
-      '--disable-extensions',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-default-apps',
-      '--disable-breakpad',
-      '--no-first-run'
+      '--no-zygote'
     ]
   },
-  // Keep the web version in sync to reduce random session closes
-  webVersionCache: webVersionCacheOption
+  // Désactiver les fonctionnalités qui peuvent causer des erreurs
+  // Options pour éviter l'erreur "markedUnread"
+  webVersionCache: {
+    type: 'remote',
+    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+  }
 });
 
 let isClientReady = false;
