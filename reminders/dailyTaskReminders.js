@@ -1,7 +1,33 @@
 'use strict';
 
 const { DateTime } = require('luxon');
-const { logReminder } = require('../lib/logger');
+const waLogs = require('../logs');
+
+function logReminder(entry) {
+  const request = entry?.request || {};
+  const response = entry?.response || {};
+  waLogs.appendLog({
+    ts: Date.now(),
+    iso: new Date().toISOString(),
+    source: request.source || 'reminders',
+    endpoint: request.endpoint || '/reminders/daily-tasks',
+    phone: request.tel || request.phone || null,
+    jid: response.jid || null,
+    type: entry?.type || null,
+    text: request.message || null,
+    caption: request.caption || null,
+    templateKey: request.templateKey || null,
+    params: request.params || null,
+    docPath: request.mediaUrl || request.docPath || request.filename || null,
+    mimeType: request.mimetype || request.mimeType || null,
+    filename: request.filename || null,
+    ok: response.success !== false,
+    messageId: response.messageId || null,
+    error: entry?.error || null,
+  }).catch((err) => {
+    console.warn('[logs] appendLog failed:', err?.message || err);
+  });
+}
 
 function getTodayDateString(tz) {
   return DateTime.now().setZone(tz).toISODate(); // YYYY-MM-DD

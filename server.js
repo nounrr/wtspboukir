@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const REMINDER_AT ='19:4';
 
 // Load environment variables from .env (use absolute path so it works under PM2/systemd)
@@ -14,11 +15,178 @@ const socketIo = require('socket.io');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCodeLib = require('qrcode');
 const cron = require('node-cron');
+const mysql = require('mysql2/promise');
 
-const { createPoolFromEnv } = require('./lib/db');
 const { runDailyTaskReminders, runDailyTaskRemindersViaApi } = require('./reminders/dailyTaskReminders');
-const { getLogs, getSentMessages, clearLogs, logReminder } = require('./lib/logger');
-const { RateLimitedQueue } = require('./lib/sendQueue');
+const waLogs = require('./logs');
+
+function createPoolFromEnv() {
+  return mysql.createPool({
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: Number(process.env.DB_PORT || 3306),
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || '',
+    waitForConnections: true,
+    connectionLimit: Number(process.env.DB_POOL_SIZE || 5),
+    queueLimit: 0,
+  });
+}
+
+function toStoredLog(entry = {}) {
+  const request = entry.request || {};
+  const response = entry.response || {};
+  return {
+    ts: Date.now(),
+    iso: new Date().toISOString(),
+    source: request.source || null,
+    endpoint: request.endpoint || null,
+    phone: request.tel || request.phone || null,
+    jid: response.jid || null,
+    type: entry.type || null,
+    text: request.message || null,
+    caption: request.caption || null,
+    templateKey: request.templateKey || null,
+    params: request.params || null,
+    docPath: request.mediaUrl || request.docPath || request.filename || null,
+    mimeType: request.mimetype || request.mimeType || null,
+    filename: request.filename || null,
+    ok: response.success !== false,
+    messageId: response.messageId || null,
+    error: entry.error || null,
+  };
+}
+
+function toLegacyLog(entry = {}) {
+  return {
+    type: entry.type || null,
+    timestamp: entry.iso || new Date(entry.ts || Date.now()).toISOString(),
+    tel: entry.phone || null,
+    request: {
+      tel: entry.phone || null,
+      message: entry.text || entry.caption || null,
+      source: entry.source || null,
+      endpoint: entry.endpoint || null,
+    },
+    response: {
+      success: entry.ok !== false,
+      jid: entry.jid || null,
+      messageId: entry.messageId || null,
+    },
+    error: entry.error || null,
+  };
+}
+
+function readStoredLogsSync() {
+  const filePath = waLogs.getLogFilePath();
+  if (!fs.existsSync(filePath)) return [];
+  const raw = fs.readFileSync(filePath, 'utf8');
+  return raw
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (_) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function logReminder(entry) {
+  waLogs.appendLog(toStoredLog(entry)).catch((err) => {
+    console.warn('[logs] appendLog failed:', err?.message || err);
+  });
+}
+
+function getLogs({ limit = 1000, date, type } = {}) {
+  let rows = readStoredLogsSync().map(toLegacyLog).reverse();
+  if (date) rows = rows.filter((row) => String(row.timestamp || '').startsWith(String(date)));
+  if (type) rows = rows.filter((row) => row.type === type);
+  return rows.slice(0, limit);
+}
+
+function getSentMessages({ limit = 1000, date } = {}) {
+  let rows = readStoredLogsSync()
+    .filter((row) => row.ok !== false)
+    .map((row) => ({
+      tel: row.phone || null,
+      timestamp: row.iso || new Date(row.ts || Date.now()).toISOString(),
+      type: row.type || null,
+      message: row.text || row.caption || null,
+      jid: row.jid || null,
+      endpoint: row.endpoint || row.source || null,
+      messageId: row.messageId || null,
+    }))
+    .reverse();
+  if (date) rows = rows.filter((row) => String(row.timestamp || '').startsWith(String(date)));
+  return rows.slice(0, limit);
+}
+
+function clearLogs() {
+  const filePath = waLogs.getLogFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, '', 'utf8');
+  return { filePath };
+}
+
+class RateLimitedQueue {
+  constructor(options = {}) {
+    this.name = options.name || 'queue';
+    this.minIntervalMs = Number(options.minIntervalMs || 0);
+    this.jitterMs = Number(options.jitterMs || 0);
+    this.longPauseChance = Number(options.longPauseChance || 0);
+    this.longPauseMinMs = Number(options.longPauseMinMs || 0);
+    this.longPauseMaxMs = Number(options.longPauseMaxMs || 0);
+    this.processor = typeof options.processor === 'function' ? options.processor : async (payload) => payload;
+    this.pending = 0;
+    this.processed = 0;
+    this.failed = 0;
+    this.nextAt = 0;
+    this.chain = Promise.resolve();
+  }
+
+  _computeDelay() {
+    const jitter = this.jitterMs > 0 ? randIntInclusive(0, this.jitterMs) : 0;
+    const longPause =
+      this.longPauseChance > 0 && Math.random() < this.longPauseChance
+        ? randIntInclusive(this.longPauseMinMs, Math.max(this.longPauseMinMs, this.longPauseMaxMs))
+        : 0;
+    return this.minIntervalMs + jitter + longPause;
+  }
+
+  enqueue(payload) {
+    this.pending += 1;
+    const run = this.chain.then(async () => {
+      try {
+        const waitMs = Math.max(0, this.nextAt - Date.now());
+        if (waitMs > 0) await sleep(waitMs);
+        const result = await this.processor(payload);
+        this.processed += 1;
+        this.nextAt = Date.now() + this._computeDelay();
+        return result;
+      } catch (err) {
+        this.failed += 1;
+        throw err;
+      } finally {
+        this.pending -= 1;
+      }
+    });
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  stats() {
+    return {
+      name: this.name,
+      pending: this.pending,
+      processed: this.processed,
+      failed: this.failed,
+      nextAt: this.nextAt,
+    };
+  }
+}
 
 const app = express();
 const server = http.createServer(app);
