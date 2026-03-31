@@ -1,273 +1,324 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WhatsApp Logs</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Logs des Reminders - WhatsApp Service</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
+    * {
       margin: 0;
       padding: 0;
-      background: #fafafa;
-      color: #171717;
-      line-height: 1.5;
+      box-sizing: border-box;
     }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
     .container {
       max-width: 1400px;
       margin: 0 auto;
-      padding: 24px;
     }
+
     .header {
-      padding: 32px 0 24px;
-      border-bottom: 1px solid #e5e5e5;
-      margin-bottom: 32px;
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+      margin-bottom: 30px;
     }
+
     .header h1 {
-      font-size: 24px;
-      font-weight: 600;
-      color: #171717;
-      margin-bottom: 4px;
+      color: #333;
+      font-size: 32px;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 15px;
     }
-    .header .subtitle {
-      font-size: 14px;
-      color: #737373;
-      font-weight: 400;
+
+    .header h1::before {
+      content: "📋";
+      font-size: 36px;
     }
-    .topbar {
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+
+    .stat-card {
       background: white;
-      border: 1px solid #e5e5e5;
-      border-radius: 8px;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+      text-align: center;
+    }
+
+    .stat-card .stat-value {
+      font-size: 36px;
+      font-weight: bold;
+      color: #667eea;
+      margin-bottom: 5px;
+    }
+
+    .stat-card .stat-label {
+      color: #666;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .filters {
+      background: white;
       padding: 20px;
-      margin-bottom: 24px;
-      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    }
-    .topbar.hidden { display: none; }
-    .row {
+      border-radius: 12px;
+      box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
       display: flex;
-      gap: 12px;
+      gap: 15px;
       flex-wrap: wrap;
-      align-items: flex-end;
+      align-items: center;
     }
-    label {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-size: 13px;
-      font-weight: 500;
-      color: #171717;
+
+    .filters label {
+      font-weight: 600;
+      color: #333;
     }
-    input, select {
-      padding: 8px 12px;
-      border: 1px solid #e5e5e5;
-      border-radius: 6px;
+
+    .filters select, .filters input {
+      padding: 10px 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
       font-size: 14px;
-      font-family: inherit;
-      background: white;
-      transition: all 0.15s ease;
-    }
-    input:focus, select:focus {
       outline: none;
-      border-color: #171717;
-      box-shadow: 0 0 0 1px #171717;
+      transition: border-color 0.3s;
     }
-    button {
-      background: #171717;
+
+    .filters select:focus, .filters input:focus {
+      border-color: #667eea;
+    }
+
+    .filters button {
+      padding: 10px 25px;
+      background: #667eea;
       color: white;
       border: none;
-      cursor: pointer;
-      font-weight: 500;
-      padding: 8px 16px;
-      border-radius: 6px;
-      font-size: 14px;
-      transition: all 0.15s ease;
-    }
-    button:hover:not(:disabled) {
-      background: #404040;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .content {
-      background: white;
-      border: 1px solid #e5e5e5;
       border-radius: 8px;
-      padding: 24px;
-      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
-    }
-    .stats-bar {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      align-items: center;
-      margin-bottom: 24px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid #e5e5e5;
-    }
-    .stat-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 12px;
-      background: #fafafa;
-      border-radius: 6px;
-      font-size: 13px;
-      color: #737373;
-    }
-    .stat-badge b {
-      color: #171717;
-      font-size: 16px;
-      font-weight: 600;
-    }
-    .muted {
-      color: #737373;
-      font-size: 13px;
-    }
-    .pagination {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      justify-content: center;
-      margin: 20px 0;
-    }
-    .pagination button {
-      padding: 6px 12px;
-      background: white;
-      color: #171717;
-      border: 1px solid #e5e5e5;
-      font-size: 13px;
-    }
-    .pagination button:hover:not(:disabled) {
-      background: #fafafa;
-      border-color: #d4d4d4;
-    }
-    .pagination span {
-      font-weight: 500;
-      color: #171717;
-      font-size: 13px;
-      padding: 0 8px;
-    }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      font-size: 13px;
-      border: 1px solid #e5e5e5;
-      border-radius: 6px;
-      overflow: hidden;
-      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    }
-    th, td {
-      padding: 10px 12px;
-      text-align: left;
-      border-bottom: 1px solid #e5e5e5;
-    }
-    th {
-      background: #fafafa;
-      color: #525252;
-      font-weight: 600;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }
-    tbody tr:hover {
-      background: #fafafa;
-    }
-    tbody tr:last-child td {
-      border-bottom: none;
-    }
-    .ok {
-      color: #16a34a;
-      font-weight: 600;
-      background: #f0fdf4;
-      padding: 2px 8px;
-      border-radius: 4px;
-      display: inline-block;
-      font-size: 11px;
-    }
-    .err {
-      color: #dc2626;
-      font-weight: 600;
-      background: #fef2f2;
-      padding: 2px 8px;
-      border-radius: 4px;
-      display: inline-block;
-      font-size: 11px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 260px 1fr;
-      gap: 24px;
-    }
-    @media (max-width: 900px) {
-      .grid { grid-template-columns: 1fr; }
-      .container { padding: 16px; }
-    }
-    .sidebar {
-      background: #fafafa;
-      padding: 16px;
-      border-radius: 6px;
-      border: 1px solid #e5e5e5;
-      height: fit-content;
-      position: sticky;
-      top: 20px;
-      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    }
-    .sidebar h3 {
+      cursor: pointer;
       font-size: 14px;
-      color: #171717;
       font-weight: 600;
-      margin-bottom: 12px;
+      transition: background 0.3s;
     }
-    ul {
-      list-style: none;
+
+    .filters button:hover {
+      background: #5568d3;
     }
-    ul li {
-      padding: 6px 0;
-      border-bottom: 1px solid #e5e5e5;
+
+    .filters button.clear {
+      background: #dc3545;
+    }
+
+    .filters button.clear:hover {
+      background: #c82333;
+    }
+
+    .logs-container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+
+    .logs-header {
+      background: #667eea;
+      color: white;
+      padding: 20px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 13px;
-      color: #525252;
     }
-    ul li:last-child {
-      border-bottom: none;
+
+    .section-title {
+      padding: 14px 20px;
+      background: #f8f9fa;
+      border-top: 2px solid #e0e0e0;
+      border-bottom: 2px solid #e0e0e0;
+      color: #333;
+      font-size: 16px;
+      font-weight: 700;
     }
-    ul li b {
-      color: #171717;
+
+    .logs-header h2 {
+      font-size: 24px;
+    }
+
+    .refresh-btn {
+      padding: 10px 20px;
+      background: white;
+      color: #667eea;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
       font-weight: 600;
+      transition: transform 0.2s;
     }
-    a {
-      color: #171717;
-      text-decoration: none;
-      font-weight: 500;
-      transition: color 0.15s;
+
+    .refresh-btn:hover {
+      transform: scale(1.05);
     }
-    a:hover {
-      color: #525252;
+
+    .logs-list {
+      max-height: 600px;
+      overflow-y: auto;
+      padding: 20px;
     }
-    code {
-      background: #fafafa;
-      padding: 2px 6px;
-      border-radius: 4px;
+
+    .log-entry {
+      border: 2px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 15px;
+      transition: all 0.3s;
+    }
+
+    .log-entry:hover {
+      border-color: #667eea;
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+    }
+
+    .log-entry.reminder_start {
+      border-left: 5px solid #007bff;
+    }
+
+    .log-entry.reminder_success {
+      border-left: 5px solid #28a745;
+    }
+
+    .log-entry.reminder_error {
+      border-left: 5px solid #dc3545;
+    }
+
+    .log-entry.reminder_complete {
+      border-left: 5px solid #6f42c1;
+    }
+
+    .log-entry.reminder_tasks_found {
+      border-left: 5px solid #ffc107;
+    }
+
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .log-type {
+      display: inline-block;
+      padding: 5px 15px;
+      border-radius: 20px;
       font-size: 12px;
-      font-family: 'SF Mono', 'Consolas', monospace;
-      border: 1px solid #e5e5e5;
+      font-weight: 600;
+      text-transform: uppercase;
     }
+
+    .log-type.reminder_start {
+      background: #cce5ff;
+      color: #004085;
+    }
+
+    .log-type.reminder_success {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .log-type.reminder_error {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    .log-type.reminder_complete {
+      background: #e2d9f3;
+      color: #3c1d62;
+    }
+
+    .log-type.reminder_tasks_found {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .log-timestamp {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .log-content {
+      display: grid;
+      gap: 10px;
+    }
+
+    .log-section {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 8px;
+    }
+
+    .log-section h4 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .log-section pre {
+      background: white;
+      padding: 10px;
+      border-radius: 5px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #333;
+    }
+
+    .error-message {
+      color: #dc3545;
+      font-weight: 600;
+      padding: 10px;
+      background: #f8d7da;
+      border-radius: 5px;
+      margin-top: 10px;
+    }
+
+    .no-logs {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+
+    .no-logs .emoji {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+
     .loading {
       text-align: center;
       padding: 40px;
-      color: #737373;
+      color: #667eea;
+      font-size: 18px;
     }
+
     .loading::after {
       content: '...';
-      animation: dots 1.5s infinite;
+      animation: dots 1.5s steps(4, end) infinite;
     }
+
     @keyframes dots {
       0%, 20% { content: '.'; }
       40% { content: '..'; }
@@ -278,292 +329,295 @@
 <body>
   <div class="container">
     <div class="header">
-      <h1>WhatsApp Logs</h1>
-      <div class="subtitle">
-        <span id="status">Loading...</span>
+      <h1>Logs des Reminders</h1>
+      <p style="color: #666; margin-top: 10px;">Suivi en temps réel des rappels de tâches WhatsApp</p>
+    </div>
+
+    <div class="stats" id="stats">
+      <div class="stat-card" style="background: linear-gradient(135deg, #20c997 0%, #17a2b8 100%); color: white;">
+        <div class="stat-value" id="totalMessages" style="color: white;">-</div>
+        <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Messages</div>
+      </div>
+      <div class="stat-card" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white;">
+        <div class="stat-value" id="todayMessages" style="color: white;">-</div>
+        <div class="stat-label" style="color: rgba(255,255,255,0.9);">Messages Aujourd'hui</div>
+      </div>
+      <div class="stat-card" style="background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); color: white;">
+        <div class="stat-value" id="totalErrors" style="color: white;">-</div>
+        <div class="stat-label" style="color: rgba(255,255,255,0.9);">Total Erreurs</div>
+      </div>
+      <div class="stat-card" style="background: linear-gradient(135deg, #ffc107 0%, #ff9800 100%); color: white;">
+        <div class="stat-value" id="todayErrors" style="color: white;">-</div>
+        <div class="stat-label" style="color: rgba(255,255,255,0.9);">Erreurs Aujourd'hui</div>
       </div>
     </div>
 
-    <div class="topbar" id="topbar">
-      <div class="row">
-        <label>
-          API Key
-          <input id="apiKey" type="password" placeholder="Enter your API key" style="min-width: 240px;" />
-        </label>
-        <label>
-          Items per page
-          <select id="perPage">
-            <option>25</option>
-            <option selected>50</option>
-            <option>100</option>
-            <option>200</option>
-          </select>
-        </label>
-        <button id="reload">Load</button>
-      </div>
+    <div class="filters">
+      <label for="dateFilter">📅 Date:</label>
+      <input type="date" id="dateFilter">
+
+      <label for="telFilter">📱 Numéro:</label>
+      <input type="text" id="telFilter" placeholder="0661888772">
+
+      <label for="limitFilter">🔢 Limite:</label>
+      <select id="limitFilter">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="500">500</option>
+      </select>
+
+      <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+        <input type="checkbox" id="excludeTestNumber" checked>
+        <span>Exclure n° test</span>
+      </label>
+
+      <button onclick="loadAll()">🔍 Filtrer</button>
+      <button class="clear" onclick="clearFilters()">❌ Réinitialiser</button>
     </div>
 
-    <div class="content">
-      <div class="stats-bar">
-        <div class="stat-badge">
-          <span>Total</span>
-          <b id="total">0</b>
-        </div>
-        <div class="stat-badge">
-          <span>Showing</span>
-          <b id="showing">0</b>
-        </div>
-        <span class="muted" id="range"></span>
-        <a id="jsonLink" href="/logs.json" target="_blank" rel="noreferrer">Download JSON</a>
+    <div class="logs-container">
+      <div class="logs-header">
+        <h2>🗂️ Reminders & Messages</h2>
+        <button class="refresh-btn" onclick="loadAll()">🔄 Actualiser</button>
       </div>
-
-      <div class="grid">
-        <div class="sidebar">
-          <h3>Messages by date</h3>
-          <ul id="byDay"><li class="muted">Loading...</li></ul>
-        </div>
-        <div>
-          <div class="pagination">
-            <button id="firstBtn">First</button>
-            <button id="prevBtn">Previous</button>
-            <span id="pageInfo">Page 1</span>
-            <button id="nextBtn">Next</button>
-            <button id="lastBtn">Last</button>
-          </div>
-
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Status</th>
-                <th>Phone</th>
-                <th>Type</th>
-                <th>Message</th>
-                <th>Document</th>
-                <th>Message ID</th>
-                <th>Source</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody id="rows">
-              <tr><td colspan="9" class="loading">Loading</td></tr>
-            </tbody>
-          </table>
-
-          <div class="pagination">
-            <button id="firstBtn2">First</button>
-            <button id="prevBtn2">Previous</button>
-            <span id="pageInfo2">Page 1</span>
-            <button id="nextBtn2">Next</button>
-            <button id="lastBtn2">Last</button>
-          </div>
-        </div>
+      <div class="section-title">📝 Reminders (logs)</div>
+      <div class="logs-list" id="logsList">
+        <div class="loading">Chargement des logs</div>
+      </div>
+      <div class="section-title">📨 Messages envoyés</div>
+      <div class="logs-list" id="messagesList">
+        <div class="loading">Chargement des messages</div>
       </div>
     </div>
   </div>
 
   <script>
-    const el = (id) => document.getElementById(id);
+    const API_BASE = window.location.origin;
 
-    let allMessages = [];
-    let currentPage = 1;
-    let perPage = 50;
-
-    function esc(s) {
-      return String(s ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
-    }
-
-    function getQueryKey() {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('key') || '';
-    }
-
-    function setStatus(text) {
-      const statusEl = el('status');
-      if (statusEl) statusEl.textContent = text;
-    }
-
-    function getTotalPages() {
-      return Math.max(1, Math.ceil(allMessages.length / perPage));
-    }
-
-    function renderPage() {
-      const totalPages = getTotalPages();
-      if (currentPage > totalPages) currentPage = totalPages;
-      if (currentPage < 1) currentPage = 1;
-
-      const start = (currentPage - 1) * perPage;
-      const end = start + perPage;
-      const pageMessages = allMessages.slice(start, end);
-
-      // Rows
-      const rowsHtml = pageMessages.map(m => {
-        const ok = m && m.ok ? 'OK' : 'ERR';
-        const okCls = m && m.ok ? 'ok' : 'err';
-        const docPath = m && m.docPath ? String(m.docPath) : '';
-        const docCell = docPath ? `<a href="${esc(docPath)}" target="_blank" rel="noreferrer">${esc(docPath.length > 40 ? docPath.slice(0, 37) + '...' : docPath)}</a>` : '-';
-        const text = (m && (m.text || m.caption)) ? (m.text || m.caption) : '-';
-        const displayText = text.length > 80 ? text.slice(0, 77) + '...' : text;
-        const dateStr = m && m.iso ? new Date(m.iso).toLocaleString('fr-FR') : '-';
-        return `
-          <tr>
-            <td>${esc(dateStr)}</td>
-            <td><span class="${okCls}">${esc(ok)}</span></td>
-            <td>${esc(m && m.phone || '-')}</td>
-            <td>${esc(m && m.type || '-')}</td>
-            <td>${esc(displayText)}</td>
-            <td>${docCell}</td>
-            <td style="font-size: 11px;">${esc(m && m.messageId || '-')}</td>
-            <td>${esc(m && (m.endpoint || m.source) || '-')}</td>
-            <td style="color: #dc3545;">${esc(m && m.error || '')}</td>
-          </tr>`;
-      }).join('');
-
-      el('rows').innerHTML = rowsHtml || '<tr><td colspan="9" class="muted" style="text-align:center;">Aucun message</td></tr>';
-      el('showing').textContent = String(pageMessages.length);
-
-      // Pagination controls
-      const pageInfoText = `Page ${currentPage} / ${totalPages}`;
-      el('pageInfo').textContent = pageInfoText;
-      el('pageInfo2').textContent = pageInfoText;
-
-      const disableFirst = currentPage === 1;
-      const disableLast = currentPage === totalPages;
-
-      el('firstBtn').disabled = disableFirst;
-      el('prevBtn').disabled = disableFirst;
-      el('nextBtn').disabled = disableLast;
-      el('lastBtn').disabled = disableLast;
-      el('firstBtn2').disabled = disableFirst;
-      el('prevBtn2').disabled = disableFirst;
-      el('nextBtn2').disabled = disableLast;
-      el('lastBtn2').disabled = disableLast;
-
-      // Scroll to top
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-
-    async function load() {
-      setStatus('Loading...');
-      el('rows').innerHTML = '<tr><td colspan="9" class="loading">Loading data</td></tr>';
-      el('byDay').innerHTML = '';
+    async function loadAll() {
+      const logsList = document.getElementById('logsList');
+      const messagesList = document.getElementById('messagesList');
+      logsList.innerHTML = '<div class="loading">Chargement des données...</div>';
+      messagesList.innerHTML = '<div class="loading">Chargement des messages...</div>';
 
       try {
-        let data = null;
+        const dateFilter = document.getElementById('dateFilter').value;
+        const telFilter = document.getElementById('telFilter').value;
+        const limitFilter = document.getElementById('limitFilter').value;
+        const excludeTest = document.getElementById('excludeTestNumber').checked;
+
+        let url = `${API_BASE}/api/logs?limit=${limitFilter || 100}`;
+        if (dateFilter) url += `&date=${dateFilter}`;
+        if (telFilter) url += `&tel=${telFilter}`;
         
-        // Try API first if we have a server
-        const isFileProtocol = window.location.protocol === 'file:';
-        
-        if (!isFileProtocol) {
-          try {
-            const key = el('apiKey').value.trim();
-            const url = new URL('/logs.json', window.location.origin);
-            if (key) url.searchParams.set('key', key);
-            url.searchParams.set('limit', '99999');
-            
-            el('jsonLink').href = url.toString();
-            const resp = await fetch(url.toString(), { method: 'GET' });
-            if (resp.ok) {
-              data = await resp.json();
-            }
-          } catch (e) {
-            console.log('API not available, using mock data');
-          }
-        }
-        
-        // Fallback to mock data
-        if (!data) {
-          const mockResp = await fetch('./mock-data.json');
-          data = await mockResp.json();
-          setStatus('Using mock data');
+        // Ajouter exclusions dynamiques si checkbox cochée
+        if (excludeTest) {
+          url += `&exclude=0659595284,212659595284`;
         }
 
-        const stats = data.stats || {};
-        const messages = Array.isArray(data.messages) ? data.messages : [];
+        const response = await fetch(url);
+        const data = await response.json();
 
-        // Reverse to show newest first
-        allMessages = messages.slice().reverse();
-        currentPage = 1;
-        perPage = Number(el('perPage').value) || 50;
-
-        el('total').textContent = String(stats.total ?? messages.length ?? 0);
-        const first = stats.firstIso || '';
-        const last = stats.lastIso || '';
-        el('range').textContent = first && last ? `${first.split('T')[0]} → ${last.split('T')[0]}` : '';
-
-        // By day
-        const days = Array.isArray(stats.days) ? stats.days : Object.keys(stats.byDay || {});
-        const byDay = stats.byDay || {};
-        const dayList = days.slice().sort().reverse();
-        if (dayList.length === 0) {
-          el('byDay').innerHTML = '<li class="muted">Aucun log</li>';
+        if (data.ok) {
+          displayErrors(Array.isArray(data.errors) ? data.errors : []);
+          displayMessages(Array.isArray(data.messages) ? data.messages : []);
+          updateStats(data.stats);
         } else {
-          el('byDay').innerHTML = dayList.map(d => `<li><span>${esc(d)}</span><b>${esc(byDay[d])}</b></li>`).join('');
+          logsList.innerHTML = '<div class="no-logs"><div class="emoji">⚠️</div><p>Erreur de chargement</p></div>';
+          messagesList.innerHTML = '<div class="no-logs"><div class="emoji">⚠️</div><p>Erreur de chargement</p></div>';
         }
-
-        renderPage();
-        setStatus('✅ Loaded');
-      } catch (e) {
-        setStatus('❌ Error: ' + (e && e.message ? e.message : String(e)));
-        el('rows').innerHTML = `<tr><td colspan="9" style="text-align:center;color:#dc3545;">${esc(e && e.message || 'Unknown error')}</td></tr>`;
+      } catch (error) {
+        console.error('Erreur:', error);
+        logsList.innerHTML = '<div class="no-logs"><div class="emoji">❌</div><p>Impossible de charger les données</p></div>';
+        messagesList.innerHTML = '<div class="no-logs"><div class="emoji">❌</div><p>Impossible de charger les messages</p></div>';
       }
     }
 
-    // Pagination handlers
-    function goToPage(page) {
-      currentPage = page;
-      renderPage();
+    function displayErrors(errors) {
+      const logsList = document.getElementById('logsList');
+      
+      if (!errors || errors.length === 0) {
+        logsList.innerHTML = '<div class="no-logs"><div class="emoji">✅</div><p>Aucune erreur</p></div>';
+        return;
+      }
+
+      logsList.innerHTML = errors.map(log => {
+        const timestamp = new Date(log.timestamp).toLocaleString('fr-FR');
+        
+        return `
+          <div class="log-entry error">
+            <div class="log-header">
+              <span class="log-type error">❌ Erreur</span>
+              <span class="log-timestamp">${timestamp}</span>
+            </div>
+            <div class="log-content">
+              ${log.request ? `<div class="log-section"><h4>📤 Requête</h4><pre>${JSON.stringify(log.request, null, 2)}</pre></div>` : ''}
+              ${log.error ? `<div class="error-message">⚠️ ${log.error}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
     }
 
-    el('firstBtn').addEventListener('click', () => goToPage(1));
-    el('firstBtn2').addEventListener('click', () => goToPage(1));
-    el('prevBtn').addEventListener('click', () => goToPage(currentPage - 1));
-    el('prevBtn2').addEventListener('click', () => goToPage(currentPage - 1));
-    el('nextBtn').addEventListener('click', () => goToPage(currentPage + 1));
-    el('nextBtn2').addEventListener('click', () => goToPage(currentPage + 1));
-    el('lastBtn').addEventListener('click', () => goToPage(getTotalPages()));
-    el('lastBtn2').addEventListener('click', () => goToPage(getTotalPages()));
+    function updateStats(stats) {
+      if (!stats) return;
 
-    el('perPage').addEventListener('change', () => {
-      perPage = Number(el('perPage').value) || 50;
-      currentPage = 1;
-      renderPage();
-    });
+      document.getElementById('totalMessages').textContent = stats.totalMessages || 0;
+      document.getElementById('todayMessages').textContent = stats.todayMessages || 0;
+      document.getElementById('totalErrors').textContent = stats.totalErrors || 0;
+      document.getElementById('todayErrors').textContent = stats.todayErrors || 0;
+    }
 
-    // init
-    const injectedKey = '__API_KEY_PLACEHOLDER__'; // Will be replaced by server
-    const queryKey = getQueryKey();
-    const finalKey = injectedKey && injectedKey !== '__API_KEY_PLACEHOLDER__' 
-      ? injectedKey 
-      : (queryKey || localStorage.getItem('wa_logs_api_key') || '');
-    
-    el('apiKey').value = finalKey;
-    
-    // Hide topbar always (auto load)
-    el('topbar').classList.add('hidden');
+    function escapeHtml(text) {
+      const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+      };
+      return text.replace(/[&<>"']/g, m => map[m]);
+    }
 
-    el('reload').addEventListener('click', () => {
-      localStorage.setItem('wa_logs_api_key', el('apiKey').value.trim());
-      load();
-    });
-
-    // Auto load always
-    load();
-
-    // Keyboard shortcuts
-    document.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      if (e.key === 'ArrowLeft') {
-        if (currentPage > 1) goToPage(currentPage - 1);
-      } else if (e.key === 'ArrowRight') {
-        if (currentPage < getTotalPages()) goToPage(currentPage + 1);
+    function normalizePhoneNumber(phone) {
+      if (!phone) return '';
+      // Enlever tous les caractères non numériques
+      let digits = phone.toString().replace(/\D+/g, '');
+      
+      // Si commence par 0, convertir en format international (212)
+      if (digits.startsWith('0') && digits.length === 10) {
+        digits = '212' + digits.substring(1);
       }
-    });
+      
+      return digits;
+    }
+
+    function isTestNumber(phone) {
+      const testNumbers = ['0659595284', '212659595284', '659595284'];
+      const normalized = normalizePhoneNumber(phone);
+      return testNumbers.some(test => normalizePhoneNumber(test) === normalized);
+    }
+
+    function getTypeLabel(type) {
+      const labels = {
+        'reminder_start': 'Démarrage',
+        'reminder_tasks_found': 'Tâches trouvées',
+        'reminder_success': 'Succès',
+        'reminder_error': 'Erreur',
+        'reminder_complete': 'Complet'
+      };
+      return labels[type] || type;
+    }
+
+    function clearFilters() {
+      document.getElementById('dateFilter').value = '';
+      document.getElementById('telFilter').value = '';
+      document.getElementById('limitFilter').value = '100';
+      document.getElementById('excludeTestNumber').checked = true;
+      loadAll();
+    }
+
+    // Charger au démarrage
+    loadAll();
+
+    // Auto-refresh toutes les 30 secondes
+    setInterval(loadAll, 30000);
+
+    function displayMessages(messages) {
+      const messagesList = document.getElementById('messagesList');
+
+      if (!messages || messages.length === 0) {
+        messagesList.innerHTML = '<div class="no-logs"><div class="emoji">📬</div><p>Aucun message envoyé</p></div>';
+        return;
+      }
+
+      // Affichage compact des messages
+      messagesList.innerHTML = `
+        <div style="padding: 15px;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <thead>
+              <tr style="background: #f8f9fa; border-bottom: 2px solid #dee2e6;">
+                <th style="padding: 10px; text-align: left;">📅 Date</th>
+                <th style="padding: 10px; text-align: left;">📞 Téléphone</th>
+                <th style="padding: 10px; text-align: left;">📝 Message (aperçu)</th>
+                <th style="padding: 10px; text-align: center;">🔍</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${messages.map((msg, index) => {
+                const messagePreview = msg.message.length > 80 ? msg.message.substring(0, 80) + '...' : msg.message;
+                const firstLine = msg.message.split('\\n')[0];
+                
+                return `
+                  <tr style="border-bottom: 1px solid #e9ecef; transition: background 0.2s;" 
+                      onmouseover="this.style.background='#f8f9fa'" 
+                      onmouseout="this.style.background='white'">
+                    <td style="padding: 8px; white-space: nowrap;">${msg.date}</td>
+                    <td style="padding: 8px; font-family: monospace;">${msg.tel}</td>
+                    <td style="padding: 8px; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                      ${escapeHtml(firstLine)}
+                    </td>
+                    <td style="padding: 8px; text-align: center;">
+                      <button onclick="showMessageDetail(${index})" 
+                              style="background: #667eea; color: white; border: none; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 12px;">
+                        Voir
+                      </button>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+      
+      // Stocker les messages pour l'affichage détaillé
+      window.currentMessages = messages;
+    }
+
+    function showMessageDetail(index) {
+      const msg = window.currentMessages[index];
+      if (!msg) return;
+      
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.7); z-index: 9999;
+        display: flex; align-items: center; justify-content: center;
+        padding: 20px;
+      `;
+      
+      modal.innerHTML = `
+        <div style="background: white; padding: 30px; border-radius: 15px; max-width: 600px; width: 100%; max-height: 80vh; overflow-y: auto; box-shadow: 0 10px 50px rgba(0,0,0,0.3);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h2 style="margin: 0; color: #333;">📨 Détails du Message</h2>
+            <button onclick="this.parentElement.parentElement.parentElement.remove()" 
+                    style="background: #dc3545; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 14px;">
+              ✕ Fermer
+            </button>
+          </div>
+          
+          <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+            <p style="margin: 5px 0;"><strong>📅 Date:</strong> ${msg.date}</p>
+            <p style="margin: 5px 0;"><strong>📞 Téléphone:</strong> ${msg.tel}</p>
+            <p style="margin: 5px 0;"><strong>🆔 JID:</strong> ${msg.jid || 'N/A'}</p>
+            ${msg.taskId ? `<p style="margin: 5px 0;"><strong>📋 Tâche ID:</strong> ${msg.taskId}</p>` : ''}
+          </div>
+          
+          <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; border-left: 4px solid #2196f3;">
+            <h3 style="margin: 0 0 10px 0; color: #1976d2;">💬 Message Complet:</h3>
+            <pre style="white-space: pre-wrap; line-height: 1.6; font-family: 'Segoe UI', sans-serif; margin: 0;">${escapeHtml(msg.message)}</pre>
+          </div>
+        </div>
+      `;
+      
+      modal.onclick = (e) => {
+        if (e.target === modal) modal.remove();
+      };
+      
+      document.body.appendChild(modal);
+    }
   </script>
 </body>
 </html>

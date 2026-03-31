@@ -1,320 +1,71 @@
-// Load environment variables from .env
-require('dotenv').config();
+const path = require('path');
+const REMINDER_AT ='19:4';
 
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+// Load environment variables from .env (use absolute path so it works under PM2/systemd)
+const dotenvResult = require('dotenv').config({ path: path.join(__dirname, '.env') });
+if (dotenvResult?.error) {
+  console.warn('[config] .env not loaded:', dotenvResult.error.message);
+}
+
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
-const fs = require('fs');
-const path = require('path');
 const qrcodeTerminal = require('qrcode-terminal');
-const qrcode = require('qrcode');
-const waLogs = require('./logs');
+const QRCodeLib = require('qrcode');
+const cron = require('node-cron');
 
-// Diagnostics (helps debug "INIT" stuck / no QR)
-let initCount = 0;
-let lastInitAt = null;
-let lastInitError = null;
-let lastQrAt = null;
-let lastAuthAt = null;
-let lastDisconnectAt = null;
-let lastDisconnectReason = null;
-let lastLoading = null;
-let initStartedAt = null;
-let initWatchdogTimer = null;
-let pendingSessionWipe = false;
-const INIT_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.WA_INIT_TIMEOUT_MS || 45000);
-  return Number.isFinite(raw) ? Math.max(5000, Math.min(5 * 60 * 1000, raw)) : 45000;
-})();
-
-// Dangerous but effective recovery: wipe LocalAuth session on init errors.
-// Enable only if you're OK with re-pairing by QR.
-const WA_AUTO_WIPE_AUTH = String(process.env.WA_AUTO_WIPE_AUTH || '').trim() === '1';
-
-function shouldWipeSessionForError(err) {
-  const m = String(err || '').toLowerCase();
-  return (
-    m.includes('target closed') ||
-    m.includes('database is locked') ||
-    (m.includes('failed to open') && m.includes('database')) ||
-    (m.includes('gcm store') && m.includes('lock')) ||
-    m.includes('lockfile') ||
-    (m.includes('leveldb') && m.includes('corruption'))
-  );
-}
+const { createPoolFromEnv } = require('./lib/db');
+const { runDailyTaskReminders, runDailyTaskRemindersViaApi } = require('./reminders/dailyTaskReminders');
+const { getLogs, getSentMessages, clearLogs, logReminder } = require('./lib/logger');
+const { RateLimitedQueue } = require('./lib/sendQueue');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
-  // Be more tolerant of slow networks / proxies
-  pingTimeout: 60000,
-  pingInterval: 25000,
-});
+const io = socketIo(server, { maxHttpBufferSize: 5e7 }); // 50MB limit for media uploads
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clampInt(value, { min, max, fallback }) {
+  const n = Number(value);
+  const intVal = Number.isFinite(n) ? Math.floor(n) : fallback;
+  if (!Number.isFinite(intVal)) return fallback;
+  return Math.max(min, Math.min(max, intVal));
+}
+
+function randIntInclusive(min, max) {
+  const a = Math.floor(min);
+  const b = Math.floor(max);
+  if (b <= a) return a;
+  return a + Math.floor(Math.random() * (b - a + 1));
+}
 
 // Security: simple API key protection for send endpoints
-// Accept both WA_API_KEY and legacy WHTSP_SERVICE_API_KEY for flexibility
 const API_KEY = process.env.WA_API_KEY || process.env.WHTSP_SERVICE_API_KEY || null;
 
-// WhatsApp Web can crash on some versions when trying to auto-mark chats as seen.
-// Default: DO NOT send seen (safer). Set WA_SEND_SEEN=1 to re-enable.
-const WA_SEND_SEEN = String(process.env.WA_SEND_SEEN || '').trim() === '1';
-
 function requireApiKey(req, res, next) {
-  if (!API_KEY) return next(); // Skip auth if no API key configured
-  const provided = req.get('x-api-key') || req.query?.key;
+  if (!API_KEY) return res.status(500).json({ ok: false, error: 'api_key_not_configured' });
+  const provided = req.get('x-api-key');
   if (!provided || provided !== API_KEY) return res.status(401).json({ ok: false, error: 'unauthorized' });
   next();
 }
 
-const WWEBJS_CLIENT_ID = process.env.WWEBJS_CLIENT_ID || 'default';
-const WWEBJS_AUTH_DIR = process.env.WWEBJS_AUTH_DIR
-  ? path.resolve(process.env.WWEBJS_AUTH_DIR)
-  : path.join(__dirname, 'auth');
-
-// Prevent multiple processes (PM2 reloads, accidental double-start) from using the same
-// Chromium profile directory, which causes: "database is locked", IndexedDB corruption, etc.
-const WA_SESSION_LOCK_ENABLED = String(process.env.WA_SESSION_LOCK || '1').trim() !== '0';
-const WA_SESSION_LOCK_RETRY_MS = (() => {
-  const raw = Number(process.env.WA_SESSION_LOCK_RETRY_MS || 15000);
-  return Number.isFinite(raw) ? Math.max(1000, Math.min(5 * 60 * 1000, raw)) : 15000;
-})();
-
-// If initialize() gets stuck, it is often Puppeteer/Chrome hanging on launch.
-// Set explicit launch timeouts so we get an error instead of silent INITIALIZING forever.
-const PUPPETEER_LAUNCH_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.WA_PUPPETEER_LAUNCH_TIMEOUT_MS || 45000);
-  return Number.isFinite(raw) ? Math.max(5000, Math.min(5 * 60 * 1000, raw)) : 45000;
-})();
-const PUPPETEER_PROTOCOL_TIMEOUT_MS = (() => {
-  const raw = Number(process.env.WA_PUPPETEER_PROTOCOL_TIMEOUT_MS || 60000);
-  return Number.isFinite(raw) ? Math.max(5000, Math.min(10 * 60 * 1000, raw)) : 60000;
-})();
-const PUPPETEER_DUMPIO = String(process.env.WA_PUPPETEER_DUMPIO || '').trim() === '1';
-
-// WhatsApp web version cache
-// On some VPS networks, fetching the remote version file can hang; allow disabling.
-const WA_WEB_VERSION_CACHE = (process.env.WA_WEB_VERSION_CACHE || 'remote').toString().trim().toLowerCase();
-const WEB_VERSION_REMOTE_DEFAULT = 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json';
-const WEB_VERSION_REMOTE = process.env.WEB_VERSION_REMOTE || WEB_VERSION_REMOTE_DEFAULT;
-const webVersionCacheOption = (() => {
-  if (WA_WEB_VERSION_CACHE === 'none' || WA_WEB_VERSION_CACHE === 'off' || WA_WEB_VERSION_CACHE === 'disabled') {
-    return { type: 'none' };
-  }
-  if (WA_WEB_VERSION_CACHE === 'remote') {
-    return { type: 'remote', remotePath: WEB_VERSION_REMOTE };
-  }
-  // Unknown value -> safe fallback
-  return { type: 'none' };
-})();
-
-// Only use CHROME_PATH if it exists; a wrong path will prevent Puppeteer from using bundled Chromium.
-const CHROME_PATH = (process.env.CHROME_PATH || '').trim();
-const CHROME_PATH_EXISTS = !!(CHROME_PATH && fs.existsSync(CHROME_PATH));
-if (CHROME_PATH && !CHROME_PATH_EXISTS) {
-  console.warn(`CHROME_PATH is set but not found: ${CHROME_PATH} (will ignore and use Puppeteer default)`);
-}
-
-function getSessionDir() {
-  return path.join(WWEBJS_AUTH_DIR, `session-${WWEBJS_CLIENT_ID}`);
-}
-
-function getSessionLockPath() {
-  return path.join(getSessionDir(), 'service.lock.json');
-}
-
-function isPidAlive(pid) {
-  if (!pid || typeof pid !== 'number') return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    // EPERM: process exists but we can't signal it => treat as alive
-    if (e && (e.code === 'EPERM' || e.code === 'EACCES')) return true;
-    return false;
-  }
-}
-
-let sessionLockAcquired = false;
-let sessionLockInfo = null;
-
-async function acquireSessionLock() {
-  if (!WA_SESSION_LOCK_ENABLED) return { ok: true, skipped: true };
-  if (sessionLockAcquired) return { ok: true };
-
-  const sessionDir = getSessionDir();
-  const lockPath = getSessionLockPath();
-
-  await fs.promises.mkdir(sessionDir, { recursive: true });
-
-  const lockPayload = {
-    pid: process.pid,
-    startedAt: Date.now(),
-    clientId: WWEBJS_CLIENT_ID,
-    authDir: WWEBJS_AUTH_DIR,
-    host: process.env.HOSTNAME || null,
-    pm2: {
-      pm_id: process.env.pm_id ?? null,
-      name: process.env.name ?? null,
-      instance: process.env.NODE_APP_INSTANCE ?? null,
-    },
-  };
-
-  try {
-    const handle = await fs.promises.open(lockPath, 'wx');
-    await handle.writeFile(JSON.stringify(lockPayload, null, 2), 'utf8');
-    await handle.close();
-    sessionLockAcquired = true;
-    sessionLockInfo = lockPayload;
-    return { ok: true };
-  } catch (e) {
-    if (e && e.code !== 'EEXIST') throw e;
-
-    // Lock exists: check if it's stale.
-    try {
-      const raw = await fs.promises.readFile(lockPath, 'utf8');
-      const existing = JSON.parse(raw);
-      const pid = Number(existing?.pid);
-
-      if (isPidAlive(pid)) {
-        return { ok: false, reason: 'lock_held', heldBy: existing };
-      }
-
-      // Stale lock file: remove and retry once
-      await fs.promises.unlink(lockPath);
-      const handle2 = await fs.promises.open(lockPath, 'wx');
-      await handle2.writeFile(JSON.stringify(lockPayload, null, 2), 'utf8');
-      await handle2.close();
-      sessionLockAcquired = true;
-      sessionLockInfo = lockPayload;
-      return { ok: true, staleRecovered: true };
-    } catch (e2) {
-      // If anything goes wrong reading/parsing/unlinking, assume lock is held.
-      return { ok: false, reason: 'lock_unknown' };
-    }
-  }
-}
-
-async function releaseSessionLock() {
-  if (!WA_SESSION_LOCK_ENABLED) return;
-  if (!sessionLockAcquired) return;
-  const lockPath = getSessionLockPath();
-  sessionLockAcquired = false;
-  sessionLockInfo = null;
-  try {
-    await fs.promises.unlink(lockPath);
-  } catch (_) {
-    // ignore
-  }
-}
-
-// Serialize all init/destroy/reinit calls to avoid launching multiple Chromiums in parallel.
-let lifecycleChain = Promise.resolve();
-function enqueueLifecycle(label, fn) {
-  lifecycleChain = lifecycleChain
-    .then(async () => {
-      try {
-        return await fn();
-      } catch (e) {
-        console.error(`[WA:lifecycle] ${label} failed:`, e?.message || e);
-        throw e;
-      }
-    })
-    .catch(() => {
-      // Swallow to keep the chain alive for future retries
-    });
-  return lifecycleChain;
-}
-
-async function cleanupChromiumSingletonLocks() {
-  const sessionDir = getSessionDir();
-  const files = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
-
-  try {
-    await fs.promises.access(sessionDir);
-  } catch (_) {
-    return; // No session dir yet
-  }
-
-  // 1) Remove top-level Chromium singleton locks
-  for (const f of files) {
-    const p = path.join(sessionDir, f);
-    try {
-      await fs.promises.unlink(p);
-      console.log(`Removed stale Chromium lock: ${p}`);
-    } catch (e) {
-      // Ignore if not present or cannot delete
-    }
-  }
-
-  // 2) Recursively remove LevelDB LOCK files that cause "database is locked" errors
-  await removeLevelDBLocks(sessionDir);
-}
-
-async function removeLevelDBLocks(dir) {
-  let entries;
-  try {
-    entries = await fs.promises.readdir(dir, { withFileTypes: true });
-  } catch (_) {
-    return;
-  }
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await removeLevelDBLocks(fullPath);
-    } else if (entry.name === 'LOCK') {
-      try {
-        await fs.promises.unlink(fullPath);
-        console.log(`Removed stale LevelDB lock: ${fullPath}`);
-      } catch (_) {
-        // ignore
-      }
-    }
-  }
-}
-
-async function wipeSessionDirIfPending(reason) {
-  if (!pendingSessionWipe) return false;
-  pendingSessionWipe = false;
-
-  const sessionDir = getSessionDir();
-  try {
-    console.warn(`[WA:wipe] Removing session dir due to: ${reason || 'unknown'}`);
-    await fs.promises.rm(sessionDir, { recursive: true, force: true });
-    return true;
-  } catch (e) {
-    console.error('[WA:wipe] Failed to remove session dir:', sessionDir, e?.message || e);
-    // Retry on next init
-    pendingSessionWipe = true;
-    return false;
-  }
-}
-
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: WWEBJS_CLIENT_ID,
-    // Persist auth in a stable folder to avoid session loss
-    dataPath: WWEBJS_AUTH_DIR,
+    clientId: process.env.WWEBJS_CLIENT_ID || undefined,
+    dataPath: process.env.WWEBJS_AUTH_DIR || undefined,
   }),
-  qrMaxRetries: 5,
-  authTimeoutMs: 60000,
   puppeteer: {
     headless: true,
     // If Chrome is installed locally, you can set CHROME_PATH env to its executable
-    executablePath: CHROME_PATH_EXISTS ? CHROME_PATH : undefined,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--no-zygote'
-    ]
+    executablePath: process.env.CHROME_PATH,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote']
   },
   // Désactiver les fonctionnalités qui peuvent causer des erreurs
+  authTimeoutMs: 60000,
+  qrMaxRetries: 5,
   // Options pour éviter l'erreur "markedUnread"
   webVersionCache: {
     type: 'remote',
@@ -322,174 +73,56 @@ const client = new Client({
   }
 });
 
+const REMINDER_SOURCE = (process.env.REMINDER_SOURCE || 'db').toLowerCase(); // 'db' | 'api'
+
+// DB pool (SIRH back database)
+let dbPool = null;
+if (REMINDER_SOURCE !== 'api') {
+  try {
+    dbPool = createPoolFromEnv();
+    console.log('[db] MySQL pool created');
+  } catch (e) {
+    console.warn('[db] Not configured, reminders disabled until DB_* env vars are set:', e?.message);
+  }
+}
+
 let isClientReady = false;
 let lastQr = null;
 let lastState = 'INIT';
 let lastReadyAt = null;
+let lastGetState = null;
+let lastGetStateAt = null;
 let reinitTimer = null;
 
-async function ensureAuthDirIsWritable() {
+async function refreshClientState() {
   try {
-    await fs.promises.mkdir(WWEBJS_AUTH_DIR, { recursive: true });
-    const probe = path.join(WWEBJS_AUTH_DIR, `.write-test-${process.pid}-${Date.now()}`);
-    await fs.promises.writeFile(probe, 'ok', 'utf8');
-    await fs.promises.unlink(probe);
-    return true;
-  } catch (e) {
-    console.error('Auth dir is not writable:', WWEBJS_AUTH_DIR, e?.message || e);
-    lastInitError = `auth_dir_not_writable: ${String(e?.message || e)}`;
-    lastState = 'INIT_ERROR';
-    return false;
-  }
-}
+    const state = await client.getState();
+    lastGetState = state;
+    lastGetStateAt = Date.now();
 
-async function safeInitializeClient() {
-  initCount += 1;
-  lastInitAt = Date.now();
-  initStartedAt = lastInitAt;
-  lastInitError = null;
-  lastLoading = null;
-  lastState = 'INITIALIZING';
-
-  try {
-    const puppeteerPkg = (() => {
-      try {
-        // whatsapp-web.js depends on puppeteer, but environments vary
-        // eslint-disable-next-line global-require
-        return require('puppeteer/package.json');
-      } catch (_) {
-        return null;
-      }
-    })();
-    console.log(
-      `[WA:init] attempt=${initCount} chromePath=${CHROME_PATH || '(none)'} chromePathExists=${CHROME_PATH_EXISTS} authDir=${WWEBJS_AUTH_DIR} clientId=${WWEBJS_CLIENT_ID} puppeteer=${puppeteerPkg?.version || 'unknown'}`
-    );
-  } catch (_) {
-    // ignore
-  }
-
-  if (initWatchdogTimer) {
-    clearTimeout(initWatchdogTimer);
-    initWatchdogTimer = null;
-  }
-  const thisInitAt = initStartedAt;
-  initWatchdogTimer = setTimeout(() => {
-    // If we’re still not ready and no QR after N ms, treat as hung browser start.
-    const stillSameAttempt = initStartedAt === thisInitAt;
-    const stillBooting = !isClientReady && !lastQr && (lastState === 'INITIALIZING' || lastState === 'LOADING');
-    if (stillSameAttempt && stillBooting) {
-      lastInitError = `init_timeout_${INIT_TIMEOUT_MS}ms`;
-      lastState = 'INIT_ERROR';
-      console.error(`WhatsApp init timed out after ${INIT_TIMEOUT_MS}ms; scheduling reinit`);
-
-      if (WA_AUTO_WIPE_AUTH) {
-        // A timeout commonly happens when the Chrome profile is locked/corrupted.
-        pendingSessionWipe = true;
-      }
-
-      scheduleReinit(2000);
-    }
-  }, INIT_TIMEOUT_MS);
-
-  const authOk = await ensureAuthDirIsWritable();
-  if (!authOk) {
-    scheduleReinit(8000);
-    return;
-  }
-
-  // Acquire cross-process lock before touching the Chromium profile.
-  try {
-    const lock = await acquireSessionLock();
-    if (!lock.ok) {
-      const held = lock.heldBy ? ` pid=${lock.heldBy?.pid} startedAt=${lock.heldBy?.startedAt}` : '';
-      lastInitError = `session_lock_${lock.reason || 'blocked'}${held}`;
-      lastState = 'LOCKED';
-      console.error(`[WA:lock] Session is in use by another process.${held}`);
-      scheduleReinit(WA_SESSION_LOCK_RETRY_MS);
-      return;
-    }
-  } catch (e) {
-    lastInitError = `session_lock_failed: ${String(e?.message || e)}`;
-    lastState = 'INIT_ERROR';
-    console.error('[WA:lock] Failed to acquire session lock:', e?.message || e);
-    scheduleReinit(8000);
-    return;
-  }
-
-  if (WA_AUTO_WIPE_AUTH) {
-    await wipeSessionDirIfPending(lastInitError || 'previous_init_error');
-  }
-
-  try {
-    await cleanupChromiumSingletonLocks();
-  } catch (_) {
-    // ignore
-  }
-
-  try {
-    // whatsapp-web.js initialize() is not guaranteed to return a promise across versions
-    await Promise.resolve(client.initialize());
-  } catch (e) {
-    lastInitError = String(e?.message || e);
-    lastState = 'INIT_ERROR';
-    console.error('client.initialize() failed:', lastInitError);
-
-    if (WA_AUTO_WIPE_AUTH && shouldWipeSessionForError(lastInitError)) {
-      pendingSessionWipe = true;
-      console.warn('[WA:init] Detected locked/corrupt profile; will wipe session on next init');
+    if (typeof state === 'string' && state) {
+      // Keep lastState aligned with what WhatsApp reports (whatsapp-web.js can miss change_state on some updates)
+      lastState = state;
     }
 
-    scheduleReinit(8000);
-  }
-}
-
-async function killOrphanChromeProcesses() {
-  // On Linux, kill any orphaned chrome/chromium processes spawned by this service
-  if (process.platform !== 'linux' && process.platform !== 'darwin') return;
-  try {
-    const { execSync } = require('child_process');
-    // Find chrome processes whose parent is this node process or whose session dir matches
-    const sessionDir = getSessionDir();
-    const pids = execSync(
-      `pgrep -f "${sessionDir.replace(/'/g, '')}" 2>/dev/null || true`,
-      { encoding: 'utf8', timeout: 5000 }
-    ).trim();
-    if (pids) {
-      for (const pid of pids.split('\n').filter(Boolean)) {
-        const n = Number(pid);
-        if (n && n !== process.pid) {
-          try {
-            process.kill(n, 'SIGKILL');
-            console.log(`[WA:cleanup] Killed orphan chrome pid=${n}`);
-          } catch (_) { /* already dead */ }
-        }
-      }
+    // Self-heal: sometimes the WhatsApp Web session is CONNECTED but the 'ready' event never fires.
+    // In that case, allow the service to recover automatically.
+    if (state === 'CONNECTED' && !isClientReady) {
+      console.warn('[wa] state is CONNECTED but isClientReady=false; forcing ready=true');
+      isClientReady = true;
+      lastReadyAt = Date.now();
+      io.emit('ready');
     }
-  } catch (_) {
-    // ignore
-  }
-}
 
-async function safeReinitClient() {
-  try {
-    // Best-effort: destroy existing puppeteer/session if a previous init is hung
-    if (typeof client.destroy === 'function') {
-      await Promise.resolve(client.destroy());
+    if (state !== 'CONNECTED' && isClientReady) {
+      // If WhatsApp reports non-connected state, reflect it.
+      isClientReady = false;
     }
-  } catch (_) {
-    // ignore
+
+    return state;
+  } catch (_e) {
+    return null;
   }
-
-  // Kill any orphaned Chrome processes left from previous crashed attempts
-  await killOrphanChromeProcesses();
-
-  // Release the session lock so safeInitializeClient can re-acquire it cleanly
-  await releaseSessionLock();
-
-  // Small delay to let OS release file handles
-  await new Promise(r => setTimeout(r, 1000));
-
-  await safeInitializeClient();
 }
 function scheduleReinit(delayMs = 3000) {
   if (reinitTimer) return;
@@ -497,11 +130,68 @@ function scheduleReinit(delayMs = 3000) {
     reinitTimer = null;
     try {
       console.log('Reinitialisation du client WhatsApp...');
-      enqueueLifecycle('reinit', safeReinitClient);
+      client.initialize();
     } catch (e) {
       console.warn('Erreur lors de la réinitialisation:', e?.message);
     }
   }, delayMs);
+}
+
+// WhatsApp send throttling (prevents burst sending that can trigger bans/blocks)
+// Defaults: 10 messages per 10 minutes, smoothed to ~1/min with some jitter.
+const WA_RATE_WINDOW_MS = process.env.WA_RATE_WINDOW_MS ? Number(process.env.WA_RATE_WINDOW_MS) : 10 * 60 * 1000;
+const WA_RATE_MAX = process.env.WA_RATE_MAX ? Number(process.env.WA_RATE_MAX) : 10;
+const WA_MIN_INTERVAL_MS = process.env.WA_MIN_INTERVAL_MS
+  ? Number(process.env.WA_MIN_INTERVAL_MS)
+  : (Number.isFinite(WA_RATE_WINDOW_MS) && Number.isFinite(WA_RATE_MAX) && WA_RATE_MAX > 0)
+    ? Math.ceil(WA_RATE_WINDOW_MS / WA_RATE_MAX)
+    : 0;
+const WA_JITTER_MS = process.env.WA_JITTER_MS ? Number(process.env.WA_JITTER_MS) : 2500;
+
+// Optional occasional long pause between sends (helps mimic human usage)
+const WA_LONG_PAUSE_CHANCE = process.env.WA_LONG_PAUSE_CHANCE ? Number(process.env.WA_LONG_PAUSE_CHANCE) : 0;
+const WA_LONG_PAUSE_MIN_MS = process.env.WA_LONG_PAUSE_MIN_MS ? Number(process.env.WA_LONG_PAUSE_MIN_MS) : 0;
+const WA_LONG_PAUSE_MAX_MS = process.env.WA_LONG_PAUSE_MAX_MS ? Number(process.env.WA_LONG_PAUSE_MAX_MS) : 0;
+
+// WhatsApp-web.js sometimes crashes inside "sendSeen" after WhatsApp Web updates.
+// Default to false to keep sending messages reliable; can be re-enabled via WA_SEND_SEEN=true.
+const WA_SEND_SEEN = String(process.env.WA_SEND_SEEN || 'false').toLowerCase() === 'true';
+
+// File to persist queue state
+const QUEUE_FILE = path.join(__dirname, '.queue-persist.json');
+
+const waSendQueue = new RateLimitedQueue({
+  name: 'wa-send',
+  storageFile: QUEUE_FILE,
+  minIntervalMs: WA_MIN_INTERVAL_MS,
+  maxPerWindow: WA_RATE_MAX,
+  windowMs: WA_RATE_WINDOW_MS,
+  jitterMs: WA_JITTER_MS,
+  longPauseChance: WA_LONG_PAUSE_CHANCE,
+  longPauseMinMs: WA_LONG_PAUSE_MIN_MS,
+  longPauseMaxMs: WA_LONG_PAUSE_MAX_MS,
+  logger: console,
+  processor: async ({ jid, text, media }) => {
+    // Wait for client to be ready (instead of failing immediately if queue loads before content)
+    while (!isClientReady || !isWaConnected()) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    const options = { sendSeen: WA_SEND_SEEN };
+    if (media && media.data) {
+        const { MessageMedia } = require('whatsapp-web.js');
+        const msgMedia = new MessageMedia(media.mimetype, media.data, media.filename);
+        if (text) {
+          options.caption = text;
+        }
+        return client.sendMessage(jid, msgMedia, options);
+    }
+    return client.sendMessage(jid, text, options);
+  }
+});
+
+async function enqueueWaSend(jid, text, meta = {}) {
+  // Pass data object { jid, text, media } to be persisted
+  return waSendQueue.enqueue({ jid, text, media: meta.media }, { jid, meta });
 }
 
 // CORS (allow calls from frontend)
@@ -517,23 +207,23 @@ app.use((req, res, next) => {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
-client.on('qr', (qr) => {
+client.on('qr', async (qr) => {
   console.log('QR Code généré');
   isClientReady = false;
   lastQr = qr;
-  lastQrAt = Date.now();
-  lastState = 'QR';
-  if (initWatchdogTimer) {
-    clearTimeout(initWatchdogTimer);
-    initWatchdogTimer = null;
-  }
   try {
     console.log('Scanne ce QR avec WhatsApp > Appareils liés (Linked devices):');
     qrcodeTerminal.generate(qr, { small: true });
   } catch (e) {
     console.warn('Impossible d\'afficher le QR en ASCII:', e?.message);
   }
-  io.emit('qr', qr);
+  
+  try {
+      const qrDataUrl = await QRCodeLib.toDataURL(qr);
+      io.emit('qr', { qr, qrDataUrl });
+  } catch(e) {
+      io.emit('qr', { qr });
+  }
 });
 
 client.on('ready', () => {
@@ -541,20 +231,11 @@ client.on('ready', () => {
   isClientReady = true;
   lastState = 'CONNECTED';
   lastReadyAt = Date.now();
-  if (initWatchdogTimer) {
-    clearTimeout(initWatchdogTimer);
-    initWatchdogTimer = null;
-  }
-  // Une fois prêt, on n'a plus de QR actif
-  lastQr = null;
   io.emit('ready');
 });
 
 client.on('authenticated', () => {
   console.log('Authentifié ✅');
-  lastAuthAt = Date.now();
-  // QR n'est plus pertinent après authentification
-  lastQr = null;
   io.emit('authenticated');
 });
 
@@ -562,11 +243,6 @@ client.on('auth_failure', (msg) => {
   console.error('Erreur d\'authentification :', msg);
   isClientReady = false;
   lastState = 'AUTH_FAILURE';
-  lastInitError = String(msg || 'auth_failure');
-  if (initWatchdogTimer) {
-    clearTimeout(initWatchdogTimer);
-    initWatchdogTimer = null;
-  }
   io.emit('auth_failure', msg);
   scheduleReinit(5000);
 });
@@ -575,24 +251,8 @@ client.on('disconnected', (reason) => {
   console.log('Déconnecté :', reason);
   isClientReady = false;
   lastState = 'DISCONNECTED';
-  lastDisconnectAt = Date.now();
-  lastDisconnectReason = String(reason || 'unknown');
-  if (initWatchdogTimer) {
-    clearTimeout(initWatchdogTimer);
-    initWatchdogTimer = null;
-  }
   io.emit('disconnected', reason);
   scheduleReinit(3000);
-});
-
-// Useful signal while booting (whatsapp-web.js emits this in many versions)
-client.on('loading_screen', (percent, message) => {
-  lastLoading = {
-    percent: typeof percent === 'number' ? percent : null,
-    message: message ? String(message) : null,
-    at: Date.now(),
-  };
-  if (!isClientReady && lastState !== 'QR') lastState = 'LOADING';
 });
 
 client.on('change_state', (state) => {
@@ -600,15 +260,20 @@ client.on('change_state', (state) => {
 });
 
 // Gérer les connexions Socket.IO
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   console.log('Nouveau client connecté');
 
   // Envoyer l'état actuel du client
   if (isClientReady) {
     socket.emit('ready');
+  } else if (lastQr) {
+      try {
+          const qrDataUrl = await QRCodeLib.toDataURL(lastQr);
+          socket.emit('qr', { qr: lastQr, qrDataUrl });
+      } catch(e) {}
   }
 
-  socket.on('send_message', async ({ phoneNumber, message }) => {
+  socket.on('send_message', async ({ phoneNumber, message, media }) => {
     try {
       // Vérifier que le client est prêt
       if (!isClientReady) {
@@ -616,43 +281,20 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const digits = normalizePhone(phoneNumber);
-      const jid = await resolveJidFromPhone(phoneNumber);
-      if (!jid) {
+      const chatId = normalizeToJid(phoneNumber);
+      
+      // Vérifier que le numéro est valide
+      const numberId = await client.getNumberId(chatId.replace('@c.us',''));
+      if (!numberId) {
         socket.emit('message_error', 'Numéro WhatsApp invalide ou non enregistré');
         return;
       }
 
-      const msg = await sendWithLidFallback({
-        phone: phoneNumber,
-        jid,
-        digits,
-        payload: message,
-      });
+      await enqueueWaSend(chatId, message, { source: 'socket_io', media });
       console.log('Message envoyé à', phoneNumber);
-      waLogs.appendLog({
-        source: 'socket',
-        endpoint: 'socket.send_message',
-        phone: phoneNumber,
-        jid,
-        type: 'text',
-        text: message,
-        ok: true,
-        messageId: msg?.id?._serialized || null,
-      }).catch(() => {});
       socket.emit('message_success', { phoneNumber });
     } catch (err) {
       console.error('Erreur envoi message ❌', err);
-      waLogs.appendLog({
-        source: 'socket',
-        endpoint: 'socket.send_message',
-        phone: phoneNumber,
-        jid: normalizeToJid(phoneNumber),
-        type: 'text',
-        text: message,
-        ok: false,
-        error: err?.message || 'unknown',
-      }).catch(() => {});
       socket.emit('message_error', err.message || 'Erreur lors de l\'envoi du message');
     }
   });
@@ -667,35 +309,27 @@ function normalizeDigits(p) {
   return (p || '').toString().replace(/\D+/g, '');
 }
 
-// Normalize to E.164-like digits without '+' for whatsapp-web.js JID
-// Rules:
-// - If input starts with '+', keep country code as provided (do NOT override)
-// - If input starts with '00', treat as international and drop leading '00'
-// - If input is local (starts with '0' or no cc), require DEFAULT_CC, else return as-is (will fail upstream)
 function normalizePhone(phone) {
   const raw = (phone || '').toString().trim();
   if (!raw) return '';
   if (raw.startsWith('+')) {
-    // Strip '+' but preserve digits
     return normalizeDigits(raw);
   }
   if (raw.startsWith('00')) {
-    // '00' international prefix -> drop and keep rest
     return normalizeDigits(raw.slice(2));
   }
+
   let p = normalizeDigits(raw);
   if (!p) return '';
+
   const ccEnv = (process.env.DEFAULT_CC || '').replace(/\D+/g, '');
-  // Local numbers: leading zero or missing cc
   if (p.startsWith('0')) {
     if (ccEnv) {
       return ccEnv + p.slice(1);
     }
-    return p; // no DEFAULT_CC: leave as-is; upstream will error
+    return p;
   }
-  // If no explicit cc and env provided, prepend cc; else keep as provided
   if (ccEnv && !p.startsWith(ccEnv)) {
-    // Heuristic: if length matches local pattern and doesn't start with cc, prepend cc
     return ccEnv + p;
   }
   return p;
@@ -703,65 +337,117 @@ function normalizePhone(phone) {
 
 function normalizeToJid(phone) {
   const digits = normalizePhone(phone);
-  if (!digits) return '';
   return `${digits}@c.us`;
 }
 
 async function resolveJidFromPhone(phone) {
   const digits = normalizePhone(phone);
-  if (!digits) return null;
-  if (digits.length < 8) return null;
+  if (!digits || digits.length < 8) return null;
   try {
     const numberId = await client.getNumberId(digits);
-    // Only return a JID if WhatsApp confirms the number exists.
-    // Falling back to `${digits}@c.us` can crash inside whatsapp-web.js/WhatsApp Web
-    // (e.g. "Evaluation failed ... reading 'markedUnread'") when the chat object is undefined.
     return numberId?._serialized || null;
   } catch (_) {
     return null;
   }
 }
 
-function looksLikeNoLidError(err) {
-  const m = (err?.message || String(err || '')).toLowerCase();
-  return m.includes('no lid for user') || m.includes('tolid') || m.includes('touserlidorthrow');
+// Daily reminders
+const REMINDER_TZ =  'Africa/Casablanca';
+
+// Reminder time (HH:mm, 24h). Example: '15:57'
+// Lecture depuis .env (REMINDER_AT), sinon par défaut 16:00
+
+// Debug: Log effective configuration
+console.log('[config] REMINDER_AT:', REMINDER_AT);
+console.log('[config] REMINDER_TZ from env:', process.env.REMINDER_TZ);
+console.log('[config] REMINDER_CRON from env (optional override):', process.env.REMINDER_CRON);
+
+function cronFromReminderAt(reminderAt) {
+  if (!reminderAt) {
+    console.log('[config] cronFromReminderAt: reminderAt is empty/null');
+    return null;
+  }
+  const m = String(reminderAt).trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!m) {
+    console.log('[config] cronFromReminderAt: invalid format for', reminderAt);
+    return null;
+  }
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  const cron = `${minute} ${hour} * * *`;
+  console.log('[config] cronFromReminderAt: converted', reminderAt, 'to', cron);
+  return cron;
 }
 
-async function sendWithLidFallback({ phone, jid, digits, payload, options }) {
-  // Default options: disable sendSeen unless explicitly enabled.
-  const mergedOptions = {
-    ...(options || {}),
-    sendSeen: WA_SEND_SEEN,
-  };
+const REMINDER_CRON = process.env.REMINDER_CRON || cronFromReminderAt(REMINDER_AT) || '0 8 * * *';
+console.log('[config] Final REMINDER_CRON:', REMINDER_CRON);
+const REMINDER_ONLY_ENVOYER_AUTO = (process.env.REMINDER_ONLY_ENVOYER_AUTO || 'true').toLowerCase() !== 'false';
+const REMINDER_SEND_DELAY_MS = process.env.REMINDER_SEND_DELAY_MS ? Number(process.env.REMINDER_SEND_DELAY_MS) : 600;
+const REMINDER_API_BASE = process.env.REMINDER_API_BASE || null; // e.g. https://example.com/api
+const REMINDER_API_KEY = process.env.REMINDER_API_KEY || process.env.TEMPLATE_API_KEY || null;
 
-  // First try with the resolved JID (usually ...@c.us)
-  try {
-    return await client.sendMessage(jid, payload, mergedOptions);
-  } catch (e) {
-    // Workaround for recent WhatsApp Web changes where some accounts fail with:
-    // "Evaluation failed: Error: No LID for user".
-    if (!looksLikeNoLidError(e)) throw e;
+function isWaConnected() {
+  return lastState === 'CONNECTED' || lastGetState === 'CONNECTED';
+}
 
-    const altDigits = digits || normalizePhone(phone);
-    if (!altDigits) throw e;
-
-    // Try alternate server form used by WhatsApp internally.
-    const altJid = `${altDigits}@s.whatsapp.net`;
-    try {
-      return await client.sendMessage(altJid, payload, mergedOptions);
-    } catch (e2) {
-      // Last attempt: if jid was ...@c.us, try again explicitly.
-      const cUsJid = `${altDigits}@c.us`;
-      if (cUsJid !== jid) {
-        try {
-          return await client.sendMessage(cUsJid, payload, mergedOptions);
-        } catch (_) {
-          // fall through
-        }
-      }
-      throw e2;
+if (REMINDER_SOURCE === 'api') {
+  if (!REMINDER_API_BASE) {
+    console.warn('[reminders] REMINDER_SOURCE=api but REMINDER_API_BASE is missing; reminders disabled');
+  } else {
+    if (!REMINDER_API_KEY) {
+      console.warn('[reminders] REMINDER_SOURCE=api but REMINDER_API_KEY is missing; backend may return 401');
+    } else {
+      console.log(`[reminders] api auth configured (keyLen=${String(REMINDER_API_KEY).length})`);
     }
+    cron.schedule(
+      REMINDER_CRON,
+      async () => {
+        try {
+          const result = await runDailyTaskRemindersViaApi({
+            client,
+            apiBase: REMINDER_API_BASE,
+            apiKey: REMINDER_API_KEY,
+            normalizeToJid,
+            isWaConnected,
+            tz: REMINDER_TZ,
+            onlyEnvoyerAuto: REMINDER_ONLY_ENVOYER_AUTO,
+            sendMessage: enqueueWaSend,
+            sendDelayMs: 0,
+            logger: console,
+          });
+          console.log('[reminders] done', result);
+        } catch (e) {
+          console.error('[reminders] job error', e);
+        }
+      },
+      { timezone: REMINDER_TZ }
+    );
+    console.log(`[reminders] scheduled cron="${REMINDER_CRON}" tz="${REMINDER_TZ}" source=api onlyEnvoyerAuto=${REMINDER_ONLY_ENVOYER_AUTO}`);
   }
+} else if (dbPool) {
+  cron.schedule(
+    REMINDER_CRON,
+    async () => {
+      try {
+        const result = await runDailyTaskReminders({
+          client,
+          pool: dbPool,
+          normalizeToJid,
+          isWaConnected,
+          tz: REMINDER_TZ,
+          onlyEnvoyerAuto: REMINDER_ONLY_ENVOYER_AUTO,
+          sendMessage: enqueueWaSend,
+          sendDelayMs: 0,
+          logger: console,
+        });
+        console.log('[reminders] done', result);
+      } catch (e) {
+        console.error('[reminders] job error', e);
+      }
+    },
+    { timezone: REMINDER_TZ }
+  );
+  console.log(`[reminders] scheduled cron="${REMINDER_CRON}" tz="${REMINDER_TZ}" source=db onlyEnvoyerAuto=${REMINDER_ONLY_ENVOYER_AUTO}`);
 }
 
 // REST endpoints
@@ -770,299 +456,62 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/status', async (_req, res) => {
-  // Utilise l'état en cache pour éviter les retours "UNKNOWN" intermittents
   let state = lastState;
-  try {
-    // Essayez d'obtenir l'état temps-réel, mais retombez sur le cache en cas d'erreur
-    const realtime = await client.getState();
-    if (realtime) state = realtime;
-  } catch (e) {
-    // ignore, on garde lastState
-  }
+  const refreshed = await refreshClientState();
+  if (refreshed) state = refreshed;
   res.json({
-    ready: state === 'CONNECTED',
+    ready: isClientReady && (state === 'CONNECTED' || lastState === 'CONNECTED'),
     state,
+    lastState,
+    sendQueue: waSendQueue.stats(),
     hasQr: !!lastQr,
-    initCount,
-    lastInitAt,
-    initStartedAt,
-    initTimeoutMs: INIT_TIMEOUT_MS,
-    lastInitError,
-    lastQrAt,
     lastReadyAt,
-    lastAuthAt,
-    lastDisconnectAt,
-    lastDisconnectReason,
-    loading: lastLoading,
+    lastGetState,
+    lastGetStateAt,
     now: Date.now()
   });
-});
-
-// Lightweight diagnostics endpoint (no secrets)
-app.get('/debug', (_req, res) => {
-  res.json({
-    ok: true,
-    pid: process.pid,
-    node: process.version,
-    state: lastState,
-    ready: isClientReady,
-    hasQr: !!lastQr,
-    initCount,
-    lastInitAt,
-    initStartedAt,
-    initTimeoutMs: INIT_TIMEOUT_MS,
-    lastInitError,
-    lastQrAt,
-    lastReadyAt,
-    lastAuthAt,
-    lastDisconnectAt,
-    lastDisconnectReason,
-    loading: lastLoading,
-    chromePathProvided: CHROME_PATH || null,
-    chromePathExists: CHROME_PATH_EXISTS,
-    puppeteerLaunchTimeoutMs: PUPPETEER_LAUNCH_TIMEOUT_MS,
-    puppeteerProtocolTimeoutMs: PUPPETEER_PROTOCOL_TIMEOUT_MS,
-    puppeteerDumpio: PUPPETEER_DUMPIO,
-    waWebVersionCache: WA_WEB_VERSION_CACHE,
-    webVersionRemote: WEB_VERSION_REMOTE,
-    autoWipeAuthEnabled: WA_AUTO_WIPE_AUTH,
-    pendingSessionWipe,
-    authDir: WWEBJS_AUTH_DIR,
-    sessionDir: getSessionDir(),
-    sessionLockEnabled: WA_SESSION_LOCK_ENABLED,
-    sessionLockPath: getSessionLockPath(),
-    sessionLockAcquired,
-    sessionLockInfo,
-    now: Date.now(),
-  });
-});
-
-// Check if a phone number is registered on WhatsApp (no message is sent)
-// Secured via API key because it can be abused for number enumeration.
-app.get('/check-number', requireApiKey, async (req, res) => {
-  try {
-    const phone = (req.query?.phone || '').toString();
-    if (!phone) return res.status(400).json({ ok: false, error: 'phone_required' });
-
-    const state = lastState;
-    if (state !== 'CONNECTED') {
-      return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
-    }
-
-    const digits = normalizePhone(phone);
-    const jid = await resolveJidFromPhone(phone);
-    res.json({
-      ok: true,
-      input: phone,
-      normalizedDigits: digits || null,
-      registered: !!jid,
-      jid: jid || null,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
-  }
 });
 
 app.get('/qr', (_req, res) => {
-  if (!lastQr) {
-    return res.json({
-      ok: false,
-      error: 'no_qr',
-      state: lastState,
-      ready: lastState === 'CONNECTED',
-      hasQr: false,
-      lastReadyAt,
-      now: Date.now()
-    });
-  }
-  res.json({
-    ok: true,
-    qr: lastQr,
-    state: lastState,
-    ready: lastState === 'CONNECTED',
-    hasQr: true,
-    lastReadyAt,
-    now: Date.now()
-  });
-});
-
-// QR as PNG (more reliable than client-side QR libs / CDNs)
-app.get('/qr.png', async (_req, res) => {
-  try {
-    if (!lastQr) return res.status(404).json({ error: 'no_qr' });
-    const png = await qrcode.toBuffer(lastQr, {
-      type: 'png',
-      width: 320,
-      margin: 2,
-      errorCorrectionLevel: 'M',
-      color: { dark: '#000000', light: '#FFFFFF' },
-    });
-    res.setHeader('Content-Type', 'image/png');
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(png);
-  } catch (e) {
-    res.status(500).json({ error: 'qr_png_failed', detail: String(e?.message || e) });
-  }
-});
-
-// Page QR Scanner - Interface visuelle pour scanner le QR Code
-app.get('/scanner', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'qr-scanner.html'));
-});
-
-// Redirect root to scanner page if not ready, otherwise show status
-app.get('/', (_req, res) => {
-  if (isClientReady) {
-    res.json({ 
-      ok: true, 
-      status: 'ready',
-      message: 'WhatsApp is connected and ready',
-      readyAt: lastReadyAt 
-    });
-  } else {
-    res.redirect('/scanner');
-  }
-});
-
-// Logs (HTML + JSON) - secured via API key (header x-api-key or ?key=...)
-app.get('/logs.json', requireApiKey, async (req, res) => {
-  try {
-    const limit = req.query?.limit ? Number(req.query.limit) : (process.env.WA_LOG_MAX ? Number(process.env.WA_LOG_MAX) : 500);
-    const messages = await waLogs.readLastLogs({ limit });
-    const stats = waLogs.computeStats(messages);
-    res.json({ ok: true, stats, messages, logFile: waLogs.getLogFilePath() });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
-  }
-});
-
-app.get('/logs', async (req, res) => {
-  try {
-    const htmlPath = path.join(__dirname, 'public', 'logs.html');
-    let html = await require('fs').promises.readFile(htmlPath, 'utf8');
-    
-    // Inject API key from env into HTML
-    const apiKey = API_KEY || '';
-    html = html.replace('__API_KEY_PLACEHOLDER__', apiKey);
-    
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (e) {
-    res.status(500).send(`<pre>${String(e?.message || e)}</pre>`);
-  }
-});
-
-// Restart endpoint (secured)
-app.post('/restart', requireApiKey, async (_req, res) => {
-  try {
-    isClientReady = false;
-    lastState = 'RESTARTING';
-    try {
-      await client.destroy();
-    } catch (_) {}
-    setTimeout(() => {
-      scheduleReinit(500);
-    }, 200);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
-  }
-});
-
-// Logout endpoint (secured)
-// - By default: logs out (best-effort) and restarts the client.
-// - Optional: wipe the persisted auth session folder to force a fresh QR.
-//   To enable wiping, set WA_ALLOW_WIPE_AUTH=1 in env.
-app.post('/logout', requireApiKey, async (req, res) => {
-  const wantWipe = String(req.query?.wipe || '').trim() === '1';
-  const allowWipe = String(process.env.WA_ALLOW_WIPE_AUTH || '').trim() === '1';
-
-  try {
-    isClientReady = false;
-    lastState = 'LOGGING_OUT';
-    lastQr = null;
-
-    // Best-effort logout (not always supported depending on web version)
-    try {
-      if (typeof client.logout === 'function') await client.logout();
-    } catch (_) {}
-
-    try {
-      await client.destroy();
-    } catch (_) {}
-
-    let wiped = false;
-    if (wantWipe) {
-      if (!allowWipe) {
-        return res.status(403).json({ ok: false, error: 'wipe_not_allowed', hint: 'Set WA_ALLOW_WIPE_AUTH=1 to allow wipe=1' });
-      }
-      const sessionDir = getSessionDir();
-      try {
-        await fs.promises.rm(sessionDir, { recursive: true, force: true });
-        wiped = true;
-      } catch (_) {
-        // ignore
-      }
-    }
-
-    scheduleReinit(500);
-    res.json({ ok: true, wiped });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
-  }
+  if (!lastQr) return res.status(404).json({ error: 'no_qr' });
+  res.json({ qr: lastQr });
 });
 
 // Send plain text
 app.post('/send-text', requireApiKey, async (req, res) => {
   try {
     const { phone, text } = req.body || {};
-    const state = lastState;
-    if (state !== 'CONNECTED') {
-      return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
+    let state = lastState;
+    try { state = await client.getState(); } catch (_) {}
+    const connected = isClientReady && (state === 'CONNECTED' || lastState === 'CONNECTED');
+    if (!connected) {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state, lastState, isClientReady });
     }
     if (!phone || !text) return res.status(400).json({ ok: false, error: 'phone_and_text_required' });
-    const digits = normalizePhone(phone);
-    const jid = await resolveJidFromPhone(phone);
-    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
-
-    const msg = await sendWithLidFallback({ phone, jid, digits, payload: text });
-    waLogs.appendLog({
-      source: 'rest',
-      endpoint: 'POST /send-text',
-      phone,
-      jid,
-      type: 'text',
-      text,
-      ok: true,
-      messageId: msg?.id?._serialized || null,
-    }).catch(() => {});
+    const jid = normalizeToJid(phone);
+    const msg = await enqueueWaSend(jid, text, { source: 'manual_api', endpoint: '/send-text' });
+    
+    // Logger le message envoyé
+    logReminder({
+      type: 'reminder_success',
+      date: new Date().toISOString().split('T')[0],
+      request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-text' },
+      response: { success: true, jid, messageId: msg.id?._serialized }
+    });
+    
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-text error', e);
-    try {
-      const { phone, text } = req.body || {};
-      const jid = phone ? normalizeToJid(phone) : null;
-      waLogs.appendLog({
-        source: 'rest',
-        endpoint: 'POST /send-text',
-        phone,
-        jid,
-        type: 'text',
-        text,
-        ok: false,
-        error: e?.message || 'unknown',
-      }).catch(() => {});
-    } catch (_) {}
-    const msg = (e?.message || '').toLowerCase();
-    if (msg.includes('session closed') || msg.includes('protocol error')) {
-      lastState = 'DISCONNECTED';
-      isClientReady = false;
-      scheduleReinit(1000);
-      return res.status(503).json({ ok: false, error: 'wa_restarting' });
-    }
-    if (looksLikeNoLidError(e)) {
-      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
-    }
+    
+    // Logger l'erreur
+    logReminder({
+      type: 'reminder_error',
+      date: new Date().toISOString().split('T')[0],
+      request: { tel: req.body?.phone, message: req.body?.text, source: 'manual_api', endpoint: '/send-text' },
+      response: { success: false },
+      error: e?.message || 'unknown'
+    });
+    
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -1071,9 +520,11 @@ app.post('/send-text', requireApiKey, async (req, res) => {
 app.post('/send-media', requireApiKey, async (req, res) => {
   try {
     const { phone, caption, mediaUrl, base64, mimetype, filename } = req.body || {};
-    const state = lastState;
-    if (state !== 'CONNECTED') {
-      return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
+    let state = lastState;
+    try { state = await client.getState(); } catch (_) {}
+    const connected = isClientReady && (state === 'CONNECTED' || lastState === 'CONNECTED');
+    if (!connected) {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state, lastState, isClientReady });
     }
     if (!phone) return res.status(400).json({ ok: false, error: 'phone_required' });
 
@@ -1083,7 +534,9 @@ app.post('/send-media', requireApiKey, async (req, res) => {
 
     if (mediaUrl) {
       const resp = await fetch(mediaUrl);
-      if (!resp.ok) return res.status(400).json({ ok: false, error: 'fetch_media_failed', status: resp.status });
+      if (!resp.ok) {
+        return res.status(400).json({ ok: false, error: 'fetch_media_failed', status: resp.status });
+      }
       const arrayBuf = await resp.arrayBuffer();
       const buff = Buffer.from(arrayBuf);
       mediaBase64 = buff.toString('base64');
@@ -1102,64 +555,164 @@ app.post('/send-media', requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'media_data_missing' });
     }
 
-    const digits = normalizePhone(phone);
     const jid = await resolveJidFromPhone(phone);
-    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
-    const media = new MessageMedia(mediaMime, mediaBase64, mediaName);
+    if (!jid) {
+      return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
+    }
 
-    const msg = await sendWithLidFallback({
-      phone,
-      jid,
-      digits,
-      payload: media,
-      options: caption ? { caption } : undefined,
+    const msg = await enqueueWaSend(jid, caption || '', {
+      source: 'manual_api',
+      endpoint: '/send-media',
+      media: {
+        mimetype: mediaMime,
+        data: mediaBase64,
+        filename: mediaName,
+      },
     });
 
-    // IMPORTANT: we never store base64 in logs. For documents/media, store only doc path (URL) or filename.
-    waLogs.appendLog({
-      source: 'rest',
-      endpoint: 'POST /send-media',
-      phone,
-      jid,
-      type: 'media',
-      caption: caption || null,
-      docPath: mediaUrl || mediaName || null,
-      mimeType: mediaMime || null,
-      filename: mediaName || null,
-      ok: true,
-      messageId: msg?.id?._serialized || null,
-    }).catch(() => {});
+    logReminder({
+      type: 'reminder_success',
+      date: new Date().toISOString().split('T')[0],
+      request: {
+        tel: phone,
+        message: caption || '',
+        source: 'manual_api',
+        endpoint: '/send-media',
+        mediaUrl: mediaUrl || null,
+        filename: mediaName,
+      },
+      response: { success: true, jid, messageId: msg.id?._serialized },
+    });
 
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-media error', e);
-    try {
-      const { phone, caption, mediaUrl, mimetype, filename } = req.body || {};
-      const jid = phone ? normalizeToJid(phone) : null;
-      waLogs.appendLog({
-        source: 'rest',
-        endpoint: 'POST /send-media',
-        phone,
-        jid,
-        type: 'media',
-        caption: caption || null,
-        docPath: mediaUrl || filename || null,
-        mimeType: mimetype || null,
-        filename: filename || null,
-        ok: false,
-        error: e?.message || 'unknown',
-      }).catch(() => {});
-    } catch (_) {}
-    const msg = (e?.message || '').toLowerCase();
-    if (msg.includes('session closed') || msg.includes('protocol error')) {
-      lastState = 'DISCONNECTED';
-      isClientReady = false;
-      scheduleReinit(1000);
-      return res.status(503).json({ ok: false, error: 'wa_restarting' });
+
+    logReminder({
+      type: 'reminder_error',
+      date: new Date().toISOString().split('T')[0],
+      request: {
+        tel: req.body?.phone,
+        message: req.body?.caption || '',
+        source: 'manual_api',
+        endpoint: '/send-media',
+        mediaUrl: req.body?.mediaUrl || null,
+        filename: req.body?.filename || null,
+      },
+      response: { success: false },
+      error: e?.message || 'unknown',
+    });
+
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+// Send plain text in batches (bypasses waSendQueue rate-limit)
+// Body example:
+// {
+//   "items": [{"phone":"+2126...","text":"..."}],
+//   "batchSize": 10,
+//   "minDelaySec": 3,
+//   "maxDelaySec": 10,
+//   "batchPauseSec": 60
+// }
+app.post('/send-text-batch', requireApiKey, async (req, res) => {
+  try {
+    let state = lastState;
+    try { state = await client.getState(); } catch (_) {}
+    const connected = isClientReady && (state === 'CONNECTED' || lastState === 'CONNECTED');
+    if (!connected) {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state, lastState, isClientReady });
     }
-    if (looksLikeNoLidError(e)) {
-      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
+
+    const body = req.body || {};
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    if (rawItems.length === 0) return res.status(400).json({ ok: false, error: 'items_required' });
+    if (rawItems.length > 2000) return res.status(400).json({ ok: false, error: 'too_many_items', max: 2000 });
+
+    const batchSize = clampInt(body.batchSize, { min: 1, max: 50, fallback: 10 });
+    const minDelayMs = clampInt(body.minDelaySec, { min: 0, max: 60, fallback: 3 }) * 1000;
+    const maxDelayMs = clampInt(body.maxDelaySec, { min: 0, max: 120, fallback: 10 }) * 1000;
+    const batchPauseMs = clampInt(body.batchPauseSec, { min: 0, max: 3600, fallback: 60 }) * 1000;
+
+    const delayMin = Math.min(minDelayMs, maxDelayMs);
+    const delayMax = Math.max(minDelayMs, maxDelayMs);
+
+    const items = rawItems.map((it, idx) => {
+      const phone = it?.phone ?? it?.to ?? it?.tel ?? it?.recipient;
+      const text = it?.text ?? it?.message;
+      return { idx, phone, text };
+    });
+
+    const startedAt = Date.now();
+    let sent = 0;
+    let failed = 0;
+    let invalid = 0;
+
+    for (let i = 0; i < items.length; i += batchSize) {
+      const batch = items.slice(i, i + batchSize);
+
+      const settled = await Promise.allSettled(
+        batch.map(async (item) => {
+          const phone = item.phone;
+          const text = item.text;
+          if (!phone || !text) {
+            invalid++;
+            return { ok: false, skipped: true, reason: 'phone_or_text_missing', idx: item.idx };
+          }
+
+          const waitMs = randIntInclusive(delayMin, delayMax);
+          if (waitMs > 0) await sleep(waitMs);
+
+          const jid = normalizeToJid(phone);
+          try {
+            const msg = await client.sendMessage(jid, text, { sendSeen: WA_SEND_SEEN });
+            sent++;
+            logReminder({
+              type: 'reminder_success',
+              date: new Date().toISOString().split('T')[0],
+              request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-text-batch' },
+              response: { success: true, jid, messageId: msg.id?._serialized }
+            });
+            return { ok: true, idx: item.idx, jid, id: msg.id?._serialized };
+          } catch (e) {
+            failed++;
+            logReminder({
+              type: 'reminder_error',
+              date: new Date().toISOString().split('T')[0],
+              request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-text-batch' },
+              response: { success: false, jid },
+              error: e?.message || 'unknown'
+            });
+            return { ok: false, idx: item.idx, jid, error: e?.message || 'unknown' };
+          }
+        })
+      );
+
+      // If more batches remain, wait before next batch
+      const hasMore = i + batchSize < items.length;
+      if (hasMore && batchPauseMs > 0) {
+        await sleep(batchPauseMs);
+      }
+
+      // Avoid unused variable linting if any
+      void settled;
     }
+
+    const durationMs = Date.now() - startedAt;
+    res.json({
+      ok: true,
+      requested: items.length,
+      batchSize,
+      delay: { minMs: delayMin, maxMs: delayMax },
+      batchPauseMs,
+      sent,
+      failed,
+      invalid,
+      durationMs,
+    });
+  } catch (e) {
+    console.error('send-text-batch error', e);
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
@@ -1168,9 +721,11 @@ app.post('/send-media', requireApiKey, async (req, res) => {
 app.post('/send-template', requireApiKey, async (req, res) => {
   try {
     const { phone, templateKey, params } = req.body || {};
-    const state = lastState;
-    if (state !== 'CONNECTED') {
-      return res.status(503).json({ ok: false, error: 'wa_not_ready', state });
+    let state = lastState;
+    try { state = await client.getState(); } catch (_) {}
+    const connected = isClientReady && (state === 'CONNECTED' || lastState === 'CONNECTED');
+    if (!connected) {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state, lastState, isClientReady });
     }
     if (!phone || !templateKey) return res.status(400).json({ ok: false, error: 'phone_and_templateKey_required' });
 
@@ -1193,68 +748,222 @@ app.post('/send-template', requireApiKey, async (req, res) => {
     const text = data?.text || '';
     if (!text) throw new Error('Rendered text empty');
 
-    // IMPORTANT: resolve the phone via WhatsApp registry before sending.
-    // This prevents whatsapp-web.js from crashing inside page.evaluate when chat is undefined
-    // (one common symptom: "Evaluation failed: ... reading 'markedUnread'").
-    const digits = normalizePhone(phone);
-    const jid = await resolveJidFromPhone(phone);
-    if (!jid) return res.status(400).json({ ok: false, error: 'invalid_or_unregistered_phone' });
-
-    const msg = await sendWithLidFallback({ phone, jid, digits, payload: text });
-
-    waLogs.appendLog({
-      source: 'rest',
-      endpoint: 'POST /send-template',
-      phone,
-      jid,
-      type: 'template',
-      templateKey,
-      params: params || {},
-      text,
-      ok: true,
-      messageId: msg?.id?._serialized || null,
-    }).catch(() => {});
-
+    const jid = normalizeToJid(phone);
+  const msg = await enqueueWaSend(jid, text, { source: 'manual_api', endpoint: '/send-template', templateKey });
+    
+    // Logger le message envoyé
+    logReminder({
+      type: 'reminder_success',
+      date: new Date().toISOString().split('T')[0],
+      request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-template', templateKey },
+      response: { success: true, jid, messageId: msg.id?._serialized }
+    });
+    
     res.json({ ok: true, id: msg.id?._serialized });
   } catch (e) {
     console.error('send-template error', e);
-    try {
-      const { phone, templateKey, params } = req.body || {};
-      const jid = phone ? normalizeToJid(phone) : null;
-      waLogs.appendLog({
-        source: 'rest',
-        endpoint: 'POST /send-template',
-        phone,
-        jid,
-        type: 'template',
-        templateKey: templateKey || null,
-        params: params || {},
-        ok: false,
-        error: e?.message || 'unknown',
-      }).catch(() => {});
-    } catch (_) {}
-    const msg = (e?.message || '').toLowerCase();
-    if (msg.includes('session closed') || msg.includes('protocol error')) {
-      lastState = 'DISCONNECTED';
-      isClientReady = false;
-      scheduleReinit(1000);
-      return res.status(503).json({ ok: false, error: 'wa_restarting' });
-    }
-    if (looksLikeNoLidError(e)) {
-      return res.status(500).json({ ok: false, error: 'wa_no_lid_for_user' });
-    }
+    
+    // Logger l'erreur
+    logReminder({
+      type: 'reminder_error',
+      date: new Date().toISOString().split('T')[0],
+      request: { tel: req.body?.phone, source: 'manual_api', endpoint: '/send-template', templateKey: req.body?.templateKey },
+      response: { success: false },
+      error: e?.message || 'unknown'
+    });
+    
     res.status(500).json({ ok: false, error: e?.message || 'unknown' });
   }
 });
 
-(async () => {
-  // Boot WhatsApp client with diagnostics + permission checks.
-  await enqueueLifecycle('init', safeInitializeClient);
-})();
+// Endpoints pour les logs (nouveaux messages JSON uniquement)
+app.get('/api/logs', async (req, res) => {
+  try {
+    const { limit, type, date, tel, exclude } = req.query;
+    const options = {};
+    
+    if (limit) options.limit = parseInt(limit);
+    if (type) options.type = type;
+    if (date) options.date = date;
+
+    // Liste des numéros à exclure (uniquement via query param)
+    const defaultExcluded = [];
+    const excludedNumbers = exclude ? [...defaultExcluded, ...exclude.split(',').map(n => n.trim())] : defaultExcluded;
+
+    // Fonction pour normaliser et vérifier si un numéro est exclu
+    const isExcluded = (phone) => {
+      const normalized = normalizeDigits(phone);
+      return excludedNumbers.some(ex => {
+        const exNorm = normalizeDigits(ex);
+        return normalized === exNorm || normalized.endsWith(exNorm) || exNorm.endsWith(normalized);
+      });
+    };
+
+    // Récupérer tous les logs pour les erreurs
+    const allLogs = getLogs({ date: options.date });
+    
+    // Séparer les erreurs et les succès, puis filtrer
+    let errors = allLogs.filter(log => log.type === 'reminder_error' || log.type === 'error');
+    let messages = getSentMessages({ limit: options.limit || 1000, date: options.date });
+
+    // Filtrer par numéro de téléphone si spécifié
+    if (tel) {
+      const telNorm = normalizeDigits(tel);
+      messages = messages.filter(msg => {
+        const msgTel = normalizeDigits(msg.tel || '');
+        return msgTel.includes(telNorm) || telNorm.includes(msgTel);
+      });
+      errors = errors.filter(err => {
+        const errTel = normalizeDigits(err.request?.tel || '');
+        return errTel.includes(telNorm) || telNorm.includes(errTel);
+      });
+    }
+
+    // Exclure les numéros de la liste d'exclusion
+    messages = messages.filter(msg => !isExcluded(msg.tel));
+    errors = errors.filter(err => !isExcluded(err.request?.tel));
+
+    // Calculer les statistiques (uniquement messages et erreurs, après filtres)
+    const today = new Date().toISOString().split('T')[0];
+    const todayMessages = messages.filter(msg => msg.timestamp && msg.timestamp.startsWith(today));
+    const todayErrors = errors.filter(err => err.timestamp && err.timestamp.startsWith(today));
+
+    const stats = {
+      totalMessages: messages.length,
+      totalErrors: errors.length,
+      todayMessages: todayMessages.length,
+      todayErrors: todayErrors.length,
+      total: messages.length + errors.length,
+      today: todayMessages.length + todayErrors.length
+    };
+
+    // Limiter les résultats après calcul des stats
+    const limitedMessages = limit ? messages.slice(0, parseInt(limit)) : messages.slice(0, 100);
+    const limitedErrors = errors.slice(0, 20);
+
+    res.json({ 
+      ok: true, 
+      errors: limitedErrors,
+      messages: limitedMessages, 
+      stats,
+      filters: {
+        date: date || null,
+        tel: tel || null,
+        excluded: excludedNumbers,
+        limit: limit || 100
+      }
+    });
+  } catch (e) {
+    console.error('[logs] Error:', e);
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+app.get('/api/logs/messages', async (req, res) => {
+  try {
+    const { limit, date } = req.query;
+    const options = {};
+    
+    if (limit) options.limit = parseInt(limit);
+    if (date) options.date = date;
+
+    const messages = getSentMessages(options);
+
+    res.json({ ok: true, messages, total: messages.length });
+  } catch (e) {
+    console.error('[logs] Error:', e);
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+// Endpoint statistiques désactivé - travail uniquement avec nouveaux messages JSON
+// app.get('/api/logs/stats', ...);
+
+// Endpoint backfill désactivé - travail uniquement avec JSON
+// app.post('/api/logs/backfill-reminders', requireApiKey, async (req, res) => {
+//   res.status(410).json({ ok: false, error: 'endpoint_disabled', message: 'Backfill désactivé - travail uniquement avec JSON' });
+// });
+
+app.delete('/api/logs', requireApiKey, (req, res) => {
+  try {
+    const result = clearLogs();
+    res.json({ ok: true, cleared: result });
+  } catch (e) {
+    console.error('[logs] Error:', e);
+    res.status(500).json({ ok: false, error: e?.message || 'unknown' });
+  }
+});
+
+// Test endpoint to manually trigger reminders
+app.post('/api/send-reminder-test', requireApiKey, async (req, res) => {
+  try {
+    let state = 'UNKNOWN';
+    try { state = await client.getState(); } catch (_) {}
+    if (!isClientReady || state !== 'CONNECTED') {
+      return res.status(503).json({ ok: false, error: 'wa_not_ready', state, message: 'WhatsApp client is not ready. Please scan QR code first.' });
+    }
+
+    console.log('[reminder-test] Manual reminder trigger started...');
+    
+    let result;
+    if (REMINDER_SOURCE === 'api') {
+      if (!REMINDER_API_BASE) {
+        return res.status(500).json({ ok: false, error: 'REMINDER_API_BASE not configured' });
+      }
+      result = await runDailyTaskRemindersViaApi({
+        client,
+        apiBase: REMINDER_API_BASE,
+        apiKey: REMINDER_API_KEY,
+        normalizeToJid,
+        isWaConnected,
+        tz: REMINDER_TZ,
+        onlyEnvoyerAuto: REMINDER_ONLY_ENVOYER_AUTO,
+        sendMessage: enqueueWaSend,
+        sendDelayMs: 0,
+        logger: console,
+      });
+    } else if (dbPool) {
+      result = await runDailyTaskReminders({
+        client,
+        pool: dbPool,
+        normalizeToJid,
+        isWaConnected,
+        tz: REMINDER_TZ,
+        onlyEnvoyerAuto: REMINDER_ONLY_ENVOYER_AUTO,
+        sendMessage: enqueueWaSend,
+        sendDelayMs: 0,
+        logger: console,
+      });
+    } else {
+      return res.status(500).json({ ok: false, error: 'no_reminder_source_configured' });
+    }
+
+    console.log('[reminder-test] Manual reminder completed:', result);
+    res.json({ 
+      ok: true, 
+      result,
+      config: {
+        source: REMINDER_SOURCE,
+        tz: REMINDER_TZ,
+        cron: REMINDER_CRON,
+        onlyEnvoyerAuto: REMINDER_ONLY_ENVOYER_AUTO
+      }
+    });
+  } catch (e) {
+    console.error('[reminder-test] Error:', e);
+    res.status(500).json({ ok: false, error: e?.message || 'unknown', stack: e?.stack });
+  }
+});
+
+client.initialize();
+
+// Keep state in sync even if events are missed (WhatsApp Web updates can cause that).
+setInterval(() => {
+  refreshClientState();
+}, 15000).unref?.();
 
 const PORT = process.env.PORT || 3000;
-// Default to 0.0.0.0 so the QR page + Socket.IO work remotely without env tweaks
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || '127.0.0.1';
 
 server.listen(PORT, HOST, () => {
   console.log(`Serveur démarré sur http://${HOST}:${PORT}`);
@@ -1269,65 +978,3 @@ server.on('error', (err) => {
   }
   process.exit(1);
 });
-
-async function gracefulShutdown(signal) {
-  try {
-    console.warn(`[WA] Received ${signal}, shutting down...`);
-    if (reinitTimer) {
-      clearTimeout(reinitTimer);
-      reinitTimer = null;
-    }
-    if (initWatchdogTimer) {
-      clearTimeout(initWatchdogTimer);
-      initWatchdogTimer = null;
-    }
-
-    // Ensure any in-flight lifecycle op finishes, then destroy.
-    await lifecycleChain;
-    try {
-      if (typeof client.destroy === 'function') {
-        await Promise.resolve(client.destroy());
-      }
-    } catch (_) {}
-    await releaseSessionLock();
-  } finally {
-    process.exit(0);
-  }
-}
-
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-
-// Global error guards: keep process alive and try reinit
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason);
-  try {
-    lastInitError = String(reason?.message || reason?.toString?.() || reason || 'unhandledRejection');
-    if (lastState === 'INIT' || lastState === 'INITIALIZING' || lastState === 'LOADING') {
-      lastState = 'INIT_ERROR';
-    }
-  } catch (_) {}
-  const msg = (reason?.message || reason?.toString?.() || '').toLowerCase();
-  if (msg.includes('failed to launch the browser process') || msg.includes('processsingleton')) {
-    cleanupChromiumSingletonLocks()
-      .then(() => scheduleReinit(1000))
-      .catch(() => scheduleReinit(2000));
-  }
-});
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-  scheduleReinit(5000);
-});
-
-// Health ping to keep chromium session active
-setInterval(async () => {
-  try {
-    await client.getState();
-  } catch (e) {
-    // If state call fails and we were connected, trigger a reinit
-    if (lastState === 'CONNECTED') {
-      console.warn('Health ping failed, scheduling reinit');
-      scheduleReinit(3000);
-    }
-  }
-}, 60000);

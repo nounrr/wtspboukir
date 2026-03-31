@@ -1,0 +1,581 @@
+﻿<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Batch Sender - Horizon API</title>
+    <!-- Font Awesome pour les icÃ´nes -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --wa-green: #25D366;
+            --wa-dark: #128C7E;
+            --wa-teal: #075E54;
+            --bg-color: #f0f2f5;
+            --card-bg: #ffffff;
+            --text-main: #303030;
+            --text-muted: #667781;
+            --border-color: #e9edef;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            background-color: var(--card-bg);
+            width: 100%;
+            max-width: 600px;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            overflow: hidden;
+            border: 1px solid rgba(0,0,0,0.05);
+        }
+
+        .header {
+            background-color: var(--wa-teal);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header h2 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        
+        .content-body {
+            padding: 25px;
+        }
+
+        .connection-card {
+            background: #f8f9fa;
+            border: 1px solid var(--border-color);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 25px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            color: white;
+            margin-top: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        
+        .badge i { font-size: 14px; }
+        .badge-red { background: linear-gradient(135deg, #ef4444, #dc2626); }
+        .badge-green { background: linear-gradient(135deg, #22c55e, #16a34a); }
+        .badge-orange { background: linear-gradient(135deg, #f59e0b, #d97706); }
+
+        #qrContainer {
+            margin-top: 20px;
+            display: none;
+            animation: fadeIn 0.5s;
+        }
+
+        #qrContainer p {
+            font-size: 14px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+
+        #qrContainer img {
+            max-width: 220px;
+            border: 8px solid white;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            background: white;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text-main);
+            font-size: 14px;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            width: 100%;
+            height: 50px;
+            border: 2px dashed var(--border-color);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #fafafa;
+            color: var(--text-muted);
+            font-size: 14px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .file-input-wrapper:hover {
+            border-color: var(--wa-green);
+            background: #f0fff4;
+        }
+
+        .file-input-wrapper input[type="file"] {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        #fileStats {
+            display: block;
+            margin-top: 8px;
+            font-size: 13px;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 6px;
+            border-left: 3px solid var(--wa-green);
+        }
+
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+            height: 120px;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--wa-green);
+            box-shadow: 0 0 0 3px rgba(37, 211, 102, 0.1);
+        }
+
+        button#btnSend {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, var(--wa-green), var(--wa-dark));
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 10px rgba(37, 211, 102, 0.3);
+        }
+
+        button#btnSend:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(37, 211, 102, 0.4);
+        }
+
+        button#btnSend:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 12px 15px;
+            display: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .success { background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+        .error { background-color: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+
+        #progress {
+            margin-top: 20px;
+            background: #fff;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .progress-header {
+            background: #f8f9fa;
+            padding: 12px 15px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .progress-stats span {
+            font-weight: 600;
+        }
+        
+        .text-green { color: #16a34a; }
+        .text-red { color: #dc2626; }
+
+        ul#logList {
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 13px;
+            padding: 0;
+            list-style-type: none;
+            margin: 0;
+        }
+
+        ul#logList li {
+            padding: 8px 15px;
+            border-bottom: 1px solid #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        ul#logList li:last-child {
+            border-bottom: none;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2><i class="fab fa-whatsapp"></i> Bot de Diffusion WhatsApp</h2>
+        </div>
+        
+        <div class="content-body">
+            <div class="connection-card">
+                <div style="font-size: 14px; color: var(--text-muted); margin-bottom: 5px;">Ã‰tat de la connexion</div>
+                <div><span id="connBadge" class="badge badge-orange"><i class="fas fa-spinner fa-spin"></i> Connexion au serveur...</span></div>
+                
+                <div id="qrContainer">
+                    <p><i class="fas fa-qrcode"></i> Veuillez scanner ce QR Code pour lier l'appareil</p>
+                    <img id="qrImage" src="" alt="QR Code WhatsApp">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="csvFile">1. Importer la liste des contacts (CSV)</label>
+                <div class="file-input-wrapper">
+                    <i class="fas fa-file-csv" style="margin-right: 8px; font-size: 18px;"></i>
+                    <span id="csvFileName">Cliquez ou glissez votre fichier CSV ici</span>
+                    <input type="file" id="csvFile" accept=".csv">
+                </div>
+                <div id="fileStats" style="display: none;"></div>
+            </div>
+
+            <div class="form-group">
+                <label for="mediaFile">2. Joindre un fichier MultimÃ©dia (Optionnel)</label>
+                <div class="file-input-wrapper">
+                    <i class="fas fa-image" style="margin-right: 8px; font-size: 18px;"></i>
+                    <span id="mediaFileName">SÃ©lectionner une Image, VidÃ©o ou PDF</span>
+                    <input type="file" id="mediaFile" accept="image/*,video/*,application/pdf">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="message">3. RÃ©diger le message</label>
+                <textarea id="message" placeholder="Bonjour, voici notre derniÃ¨re offre..."></textarea>
+            </div>
+
+            <button id="btnSend" disabled><i class="fas fa-paper-plane"></i> Lancer la diffusion (<span id="btnCount">0</span>)</button>
+
+            <div id="status" class="status" style="display:none;"></div>
+            
+            <div id="progress" style="display: none;">
+                <div class="progress-header">
+                    <strong><i class="fas fa-tasks"></i> Progression</strong>
+                    <div class="progress-stats">
+                        <span class="text-green"><i class="fas fa-check"></i> <span id="progSent">0</span></span> &nbsp;|&nbsp; 
+                        <span class="text-red"><i class="fas fa-times"></i> <span id="progFail">0</span></span> &nbsp;|&nbsp; 
+                        <span>Total: <span id="progTotal">0</span></span>
+                    </div>
+                </div>
+                <ul id="logList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Socket.IO Client -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const btnSend = document.getElementById('btnSend');
+        const statusDiv = document.getElementById('status');
+        const csvFileInput = document.getElementById('csvFile');
+        const csvFileName = document.getElementById('csvFileName');
+        const mediaFileInput = document.getElementById('mediaFile');
+        const mediaFileName = document.getElementById('mediaFileName');
+        const fileStats = document.getElementById('fileStats');
+        const btnCount = document.getElementById('btnCount');
+        const progressDiv = document.getElementById('progress');
+        const progSent = document.getElementById('progSent');
+        const progFail = document.getElementById('progFail');
+        const progTotal = document.getElementById('progTotal');
+        const logList = document.getElementById('logList');
+
+        let targetNumbers = [];
+        let sentCount = 0;
+        let failCount = 0;
+
+        function showStatus(text, isError = false) {
+            statusDiv.innerHTML = isError ? `<i class="fas fa-exclamation-circle"></i> ${text}` : `<i class="fas fa-check-circle"></i> ${text}`;
+            statusDiv.style.display = 'flex';
+            if (isError) {
+                statusDiv.className = 'status error';
+            } else {
+                statusDiv.className = 'status success';
+            }
+        }
+
+        function addLog(text, color) {
+            const li = document.createElement('li');
+            li.innerHTML = text;
+            li.style.color = color;
+            logList.insertBefore(li, logList.firstChild);
+        }
+
+        // CSV Parser and Filter
+        csvFileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) {
+                targetNumbers = [];
+                fileStats.textContent = '';
+                fileStats.style.display = 'none';
+                btnCount.textContent = '0';
+                csvFileName.textContent = 'Cliquez ou glissez votre fichier CSV ici';
+                return;
+            }
+            
+            csvFileName.textContent = file.name;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const text = event.target.result;
+                const lines = text.split(/\r?\n/);
+                let valid = [];
+                let ignoredFixed = 0;
+                let ignoredOther = 0;
+
+                for (let i = 0; i < lines.length; i++) {
+                    const columns = lines[i].split(',');
+                    if (!columns[0]) continue;
+                    
+                    // Extraire uniquement les chiffres (enlÃ¨ve les espaces, +, -, etc.)
+                    let rawPhone = columns[0].replace(/\D/g, '');
+                    if (!rawPhone) continue;
+
+                    // Exclure les fixes : numÃ©ros commenÃ§ant par 05 ou 2125
+                    if (rawPhone.startsWith('05') || rawPhone.startsWith('2125')) {
+                        ignoredFixed++;
+                        continue;
+                    }
+                    
+                    // Garder uniquement les GSM : 06, 07, 2126, 2127
+                    if (rawPhone.startsWith('06') || rawPhone.startsWith('07') || 
+                        rawPhone.startsWith('2126') || rawPhone.startsWith('2127')) {
+                        valid.push(rawPhone);
+                    } else {
+                        // NumÃ©ros internationaux ou autres formats invisibles
+                        ignoredOther++;
+                    }
+                }
+
+                // Supprime les doublons
+                targetNumbers = [...new Set(valid)];
+                let doublons = valid.length - targetNumbers.length;
+                
+                fileStats.innerHTML = `
+                    <div><i class="fas fa-check-circle" style="color: green;"></i> <strong style="color: green;">${targetNumbers.length} numÃ©ros valides (Gsm)</strong></div>
+                    <div style="margin-top: 5px;"><i class="fas fa-times-circle" style="color: red;"></i> <span style="color: red;">${ignoredFixed} NumÃ©ros fixes (05/2125) ignorÃ©s</span></div>
+                    <div style="margin-top: 5px;"><i class="fas fa-exclamation-triangle" style="color: orange;"></i> <span style="color: orange;">${ignoredOther} Formats invalides ignorÃ©s</span></div>
+                    <div style="margin-top: 5px;"><i class="fas fa-ban" style="color: gray;"></i> <span style="color: gray;">${doublons} Doublons supprimÃ©s</span></div>
+                `;
+                fileStats.style.display = 'block';
+                btnCount.textContent = targetNumbers.length;
+            };
+            reader.readAsText(file);
+        });
+        
+        // Media File update name
+        mediaFileInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) {
+                 mediaFileName.textContent = 'SÃ©lectionner une Image, VidÃ©o ou PDF';
+                 return;
+            }
+            mediaFileName.innerHTML = `<i class="fas fa-file-check" style="color: var(--wa-green);"></i> ${file.name}`;
+        });
+
+        // Send Button Action
+        btnSend.addEventListener('click', async () => {
+            const message = document.getElementById('message').value.trim();
+            const mediaFile = mediaFileInput.files[0];
+
+            if (targetNumbers.length === 0) {
+                showStatus('Veuillez charger un fichier CSV contenant des numÃ©ros valides', true);
+                return;
+            }
+            if (!message && !mediaFile) {
+                showStatus('Veuillez Ã©crire un message ou sÃ©lectionner un mÃ©dia', true);
+                return;
+            }
+
+            let mediaData = null;
+            if (mediaFile) {
+                try {
+                    btnSend.disabled = true;
+                    btnSend.textContent = 'PrÃ©paration du mÃ©dia...';
+                    const base64Data = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result.split(',')[1]);
+                        reader.onerror = error => reject(error);
+                        reader.readAsDataURL(mediaFile);
+                    });
+                    
+                    mediaData = {
+                        data: base64Data,
+                        mimetype: mediaFile.type,
+                        filename: mediaFile.name
+                    };
+                } catch (e) {
+                    showStatus('Erreur lors de la lecture du fichier mÃ©dia', true);
+                    btnSend.disabled = false;
+                    btnSend.textContent = `Envoyer aux ${targetNumbers.length} numÃ©ros`;
+                    return;
+                }
+            }
+
+            btnSend.disabled = true;
+            statusDiv.style.display = 'none';
+            
+            // Initialisation des compteurs
+            sentCount = 0;
+            failCount = 0;
+            progSent.textContent = '0';
+            progFail.textContent = '0';
+            progTotal.textContent = targetNumbers.length;
+            logList.innerHTML = '';
+            progressDiv.style.display = 'block';
+
+            btnSend.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Envoi en cours...';
+
+            for (let i = 0; i < targetNumbers.length; i++) {
+                const phone = targetNumbers[i];
+                socket.emit('send_message', { 
+                    phoneNumber: phone, 
+                    message: message,
+                    media: mediaData 
+                });
+                
+                await new Promise(r => setTimeout(r, 150));
+            }
+            
+            btnSend.innerHTML = '<i class="fas fa-hourglass-half"></i> Diffusion dans la file d\'attente...';
+        });
+
+        socket.on('message_success', (data) => {
+            sentCount++;
+            progSent.textContent = sentCount;
+            addLog('<i class="fas fa-check text-green"></i> Succès: ' + data.phoneNumber, '#16a34a');
+            checkIfDone();
+        });
+
+        socket.on('message_error', (errorMsg) => {
+            failCount++;
+            progFail.textContent = failCount;
+            addLog('<i class="fas fa-times text-red"></i> Échec: ' + errorMsg, '#dc2626');
+            checkIfDone();
+        });
+
+        function checkIfDone() {
+            if (sentCount + failCount >= targetNumbers.length) {
+                btnSend.disabled = false;
+                btnSend.innerHTML = '<i class="fas fa-paper-plane"></i> Nouvelle diffusion';
+                showStatus('Tous les envois ont été complétés !', failCount > 0);
+            }
+        }
+
+        socket.on('ready', () => {
+            const connBadge = document.getElementById('connBadge');
+            connBadge.className = 'badge badge-green';
+            connBadge.innerHTML = '<i class="fas fa-check-circle"></i> Connecté & Prêt';
+            document.getElementById('qrContainer').style.display = 'none';
+            btnSend.disabled = false;
+        });
+
+        socket.on('qr', (data) => {
+            const connBadge = document.getElementById('connBadge');
+            connBadge.className = 'badge badge-orange';
+            connBadge.innerHTML = '<i class="fas fa-qrcode"></i> Attente Scan QR...';
+            
+            if (data.qrDataUrl) {
+                document.getElementById('qrContainer').style.display = 'block';
+                document.getElementById('qrImage').src = data.qrDataUrl;
+            }
+            btnSend.disabled = true;
+        });
+
+        socket.on('authenticated', () => {
+            const connBadge = document.getElementById('connBadge');
+            connBadge.className = 'badge badge-green';
+            connBadge.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Authentification en cours...';
+            document.getElementById('qrContainer').style.display = 'none';
+        });
+
+        socket.on('disconnect', () => {
+            const connBadge = document.getElementById('connBadge');
+            connBadge.className = 'badge badge-red';
+            connBadge.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Serveur Déconnecté';
+            document.getElementById('qrContainer').style.display = 'none';
+            btnSend.disabled = true;
+        });
+    </script>
+</body>
+</html>
+
