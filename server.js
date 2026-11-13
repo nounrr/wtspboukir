@@ -373,7 +373,7 @@ app.use((req, res, next) => {
 
 // Servir les fichiers statiques
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '50mb' }));
 
 client.on('qr', async (qr) => {
   console.log('QR Code généré');
@@ -664,10 +664,10 @@ app.post('/send-text', requireApiKey, async (req, res) => {
       type: 'reminder_success',
       date: new Date().toISOString().split('T')[0],
       request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-text' },
-      response: { success: true, jid, messageId: msg.id?._serialized }
+      response: { success: true, jid, messageId: msg?.id?._serialized }
     });
     
-    res.json({ ok: true, id: msg.id?._serialized });
+    res.json({ ok: true, id: msg?.id?._serialized });
   } catch (e) {
     console.error('send-text error', e);
     
@@ -749,10 +749,10 @@ app.post('/send-media', requireApiKey, async (req, res) => {
         mediaUrl: mediaUrl || null,
         filename: mediaName,
       },
-      response: { success: true, jid, messageId: msg.id?._serialized },
+      response: { success: true, jid, messageId: msg?.id?._serialized },
     });
 
-    res.json({ ok: true, id: msg.id?._serialized });
+    res.json({ ok: true, id: msg?.id?._serialized });
   } catch (e) {
     console.error('send-media error', e);
 
@@ -840,9 +840,9 @@ app.post('/send-text-batch', requireApiKey, async (req, res) => {
               type: 'reminder_success',
               date: new Date().toISOString().split('T')[0],
               request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-text-batch' },
-              response: { success: true, jid, messageId: msg.id?._serialized }
+              response: { success: true, jid, messageId: msg?.id?._serialized }
             });
-            return { ok: true, idx: item.idx, jid, id: msg.id?._serialized };
+            return { ok: true, idx: item.idx, jid, id: msg?.id?._serialized };
           } catch (e) {
             failed++;
             logReminder({
@@ -924,10 +924,10 @@ app.post('/send-template', requireApiKey, async (req, res) => {
       type: 'reminder_success',
       date: new Date().toISOString().split('T')[0],
       request: { tel: phone, message: text, source: 'manual_api', endpoint: '/send-template', templateKey },
-      response: { success: true, jid, messageId: msg.id?._serialized }
+      response: { success: true, jid, messageId: msg?.id?._serialized }
     });
     
-    res.json({ ok: true, id: msg.id?._serialized });
+    res.json({ ok: true, id: msg?.id?._serialized });
   } catch (e) {
     console.error('send-template error', e);
     
